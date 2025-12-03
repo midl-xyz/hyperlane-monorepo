@@ -38,7 +38,9 @@ pub trait Indexable {
 impl Indexable for HyperlaneMessage {
     fn indexing_cursor(domain: HyperlaneDomainProtocol) -> CursorType {
         match domain {
-            HyperlaneDomainProtocol::Ethereum => CursorType::SequenceAware,
+            HyperlaneDomainProtocol::Ethereum | HyperlaneDomainProtocol::Midl => {
+                CursorType::SequenceAware
+            }
             HyperlaneDomainProtocol::Fuel => todo!(),
             HyperlaneDomainProtocol::Sealevel => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cosmos => CursorType::SequenceAware,
@@ -62,7 +64,9 @@ impl Indexable for HyperlaneMessage {
 impl Indexable for InterchainGasPayment {
     fn indexing_cursor(domain: HyperlaneDomainProtocol) -> CursorType {
         match domain {
-            HyperlaneDomainProtocol::Ethereum => CursorType::RateLimited,
+            HyperlaneDomainProtocol::Ethereum | HyperlaneDomainProtocol::Midl => {
+                CursorType::RateLimited
+            }
             HyperlaneDomainProtocol::Fuel => todo!(),
             HyperlaneDomainProtocol::Sealevel => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cosmos => CursorType::RateLimited,
@@ -81,7 +85,9 @@ impl Indexable for InterchainGasPayment {
 impl Indexable for MerkleTreeInsertion {
     fn indexing_cursor(domain: HyperlaneDomainProtocol) -> CursorType {
         match domain {
-            HyperlaneDomainProtocol::Ethereum => CursorType::SequenceAware,
+            HyperlaneDomainProtocol::Ethereum | HyperlaneDomainProtocol::Midl => {
+                CursorType::SequenceAware
+            }
             HyperlaneDomainProtocol::Fuel => todo!(),
             HyperlaneDomainProtocol::Sealevel => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cosmos => CursorType::SequenceAware,
@@ -100,7 +106,9 @@ impl Indexable for MerkleTreeInsertion {
 impl Indexable for Delivery {
     fn indexing_cursor(domain: HyperlaneDomainProtocol) -> CursorType {
         match domain {
-            HyperlaneDomainProtocol::Ethereum => CursorType::RateLimited,
+            HyperlaneDomainProtocol::Ethereum | HyperlaneDomainProtocol::Midl => {
+                CursorType::RateLimited
+            }
             HyperlaneDomainProtocol::Fuel => todo!(),
             HyperlaneDomainProtocol::Sealevel => CursorType::SequenceAware,
             HyperlaneDomainProtocol::Cosmos => CursorType::RateLimited,

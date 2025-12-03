@@ -5951,6 +5951,7 @@ dependencies = [
  "hyperlane-ethereum",
  "hyperlane-fuel",
  "hyperlane-metric",
+ "hyperlane-midl",
  "hyperlane-operation-verifier",
  "hyperlane-radix",
  "hyperlane-sealevel",
@@ -6177,6 +6178,41 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "url",
+]
+
+[[package]]
+name = "hyperlane-midl"
+version = "1.7.0"
+dependencies = [
+ "abigen",
+ "async-trait",
+ "dashmap",
+ "derive-new",
+ "ethers",
+ "ethers-contract",
+ "ethers-core",
+ "ethers-prometheus",
+ "ethers-signers",
+ "eyre",
+ "futures-util",
+ "hex 0.4.3",
+ "hex-literal",
+ "hyperlane-core",
+ "hyperlane-metric",
+ "hyperlane-operation-verifier",
+ "hyperlane-warp-route",
+ "itertools 0.10.5",
+ "num 0.4.3",
+ "num-traits",
+ "reqwest 0.11.27",
+ "reqwest-utils",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.63",
+ "tokio",
+ "tracing",
+ "tracing-futures",
  "url",
 ]
 
@@ -14673,6 +14709,7 @@ dependencies = [
  "hyperlane-core",
  "hyperlane-cosmos",
  "hyperlane-ethereum",
+ "hyperlane-midl",
  "hyperlane-test",
  "itertools 0.12.1",
  "k256 0.13.4",

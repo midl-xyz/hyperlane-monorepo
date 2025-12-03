@@ -25,8 +25,9 @@ use hyperlane_cosmos::{
 };
 use hyperlane_ethereum::{
     self as h_eth, BuildableWithProvider, EthereumInterchainGasPaymasterAbi, EthereumMailboxAbi,
-    EthereumReorgPeriod, EthereumValidatorAnnounceAbi,
+    EthereumValidatorAnnounceAbi,
 };
+use hyperlane_midl as h_midl;
 use hyperlane_fuel as h_fuel;
 use hyperlane_radix::{self as h_radix, RadixProvider};
 use hyperlane_sealevel::{
@@ -166,6 +167,8 @@ impl TryFromWithMetrics<ChainConf> for MerkleTreeHookIndexer {
 pub enum ChainConnectionConf {
     /// Ethereum configuration
     Ethereum(h_eth::ConnectionConf),
+    /// Midl configuration
+    Midl(h_midl::ConnectionConf),
     /// Fuel configuration
     Fuel(h_fuel::ConnectionConf),
     /// Sealevel configuration.
@@ -187,6 +190,7 @@ impl ChainConnectionConf {
     pub fn protocol(&self) -> HyperlaneDomainProtocol {
         match self {
             Self::Ethereum(_) => HyperlaneDomainProtocol::Ethereum,
+            Self::Midl(_) => HyperlaneDomainProtocol::Midl,
             Self::Fuel(_) => HyperlaneDomainProtocol::Fuel,
             Self::Sealevel(_) => HyperlaneDomainProtocol::Sealevel,
             Self::Cosmos(_) => HyperlaneDomainProtocol::Cosmos,
@@ -201,6 +205,7 @@ impl ChainConnectionConf {
     pub fn operation_submission_config(&self) -> Option<&OpSubmissionConfig> {
         match self {
             Self::Ethereum(conf) => Some(&conf.op_submission_config),
+            Self::Midl(conf) => Some(&conf.op_submission_config),
             Self::Cosmos(conf) => Some(&conf.op_submission_config),
             Self::Sealevel(conf) => Some(&conf.op_submission_config),
             Self::Starknet(config) => Some(&config.op_submission_config),
@@ -252,6 +257,10 @@ impl ChainConf {
                 h_eth::application::EthereumApplicationOperationVerifier::new(),
             )
                 as Box<dyn ApplicationOperationVerifier>),
+            ChainConnectionConf::Midl(_conf) => Ok(Box::new(
+                h_midl::application::EthereumApplicationOperationVerifier::new(),
+            )
+                as Box<dyn ApplicationOperationVerifier>),
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(conf) => {
                 let provider =
@@ -295,6 +304,10 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 self.build_ethereum(conf, &locator, metrics, h_eth::HyperlaneProviderBuilder {})
+                    .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::HyperlaneProviderBuilder {})
                     .await
             }
             ChainConnectionConf::Fuel(_) => todo!(),
@@ -343,6 +356,10 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 self.build_ethereum(conf, &locator, metrics, h_eth::MailboxBuilder {})
+                    .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::MailboxBuilder {})
                     .await
             }
             ChainConnectionConf::Fuel(conf) => {
@@ -417,6 +434,10 @@ impl ChainConf {
                 self.build_ethereum(conf, &locator, metrics, h_eth::MerkleTreeHookBuilder {})
                     .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::MerkleTreeHookBuilder {})
+                    .await
+            }
             ChainConnectionConf::Fuel(_conf) => {
                 todo!("Fuel does not support merkle tree hooks yet")
             }
@@ -477,12 +498,23 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 let reorg_period =
-                    EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                    h_eth::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
                 self.build_ethereum(
                     conf,
                     &locator,
                     metrics,
                     h_eth::SequenceIndexerBuilder { reorg_period },
+                )
+                .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                let reorg_period =
+                    h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::SequenceIndexerBuilder { reorg_period },
                 )
                 .await
             }
@@ -559,12 +591,23 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 let reorg_period =
-                    EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                    h_eth::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
                 self.build_ethereum(
                     conf,
                     &locator,
                     metrics,
                     h_eth::DeliveryIndexerBuilder { reorg_period },
+                )
+                .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                let reorg_period =
+                    h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::DeliveryIndexerBuilder { reorg_period },
                 )
                 .await
             }
@@ -644,6 +687,15 @@ impl ChainConf {
                 )
                 .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::InterchainGasPaymasterBuilder {},
+                )
+                .await
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(conf) => {
                 let provider =
@@ -707,12 +759,26 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 let reorg_period =
-                    EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                    h_eth::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
                 self.build_ethereum(
                     conf,
                     &locator,
                     metrics,
                     h_eth::InterchainGasPaymasterIndexerBuilder {
+                        mailbox_address: self.addresses.mailbox.into(),
+                        reorg_period,
+                    },
+                )
+                .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                let reorg_period =
+                    h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::InterchainGasPaymasterIndexerBuilder {
                         mailbox_address: self.addresses.mailbox.into(),
                         reorg_period,
                     },
@@ -781,12 +847,23 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 let reorg_period =
-                    EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                    h_eth::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
                 self.build_ethereum(
                     conf,
                     &locator,
                     metrics,
                     h_eth::MerkleTreeHookIndexerBuilder { reorg_period },
+                )
+                .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                let reorg_period =
+                    h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::MerkleTreeHookIndexerBuilder { reorg_period },
                 )
                 .await
             }
@@ -861,6 +938,10 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 self.build_ethereum(conf, &locator, metrics, h_eth::ValidatorAnnounceBuilder {})
+                    .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::ValidatorAnnounceBuilder {})
                     .await
             }
             ChainConnectionConf::Fuel(_) => todo!(),
@@ -946,6 +1027,15 @@ impl ChainConf {
                 )
                 .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::InterchainSecurityModuleBuilder {},
+                )
+                .await
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(conf) => {
                 let keypair = self.sealevel_signer().await.context(ctx)?;
@@ -1005,6 +1095,10 @@ impl ChainConf {
         match &self.connection {
             ChainConnectionConf::Ethereum(conf) => {
                 self.build_ethereum(conf, &locator, metrics, h_eth::MultisigIsmBuilder {})
+                    .await
+            }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::MultisigIsmBuilder {})
                     .await
             }
             ChainConnectionConf::Fuel(_) => todo!(),
@@ -1069,6 +1163,10 @@ impl ChainConf {
                 self.build_ethereum(conf, &locator, metrics, h_eth::RoutingIsmBuilder {})
                     .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::RoutingIsmBuilder {})
+                    .await
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => {
                 Err(eyre!("Sealevel does not support routing ISM yet")).context(ctx)
@@ -1123,6 +1221,10 @@ impl ChainConf {
                 self.build_ethereum(conf, &locator, metrics, h_eth::AggregationIsmBuilder {})
                     .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::AggregationIsmBuilder {})
+                    .await
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => {
                 Err(eyre!("Sealevel does not support aggregation ISM yet")).context(ctx)
@@ -1173,6 +1275,10 @@ impl ChainConf {
                 self.build_ethereum(conf, &locator, metrics, h_eth::CcipReadIsmBuilder {})
                     .await
             }
+            ChainConnectionConf::Midl(conf) => {
+                self.build_midl(conf, &locator, metrics, h_midl::CcipReadIsmBuilder {})
+                    .await
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => {
                 Err(eyre!("Sealevel does not support CCIP read ISM yet")).context(ctx)
@@ -1208,6 +1314,7 @@ impl ChainConf {
         if let Some(conf) = &self.signer {
             let chain_signer: Box<dyn ChainSigner> = match &self.connection {
                 ChainConnectionConf::Ethereum(_) => Box::new(conf.build::<h_eth::Signers>().await?),
+                ChainConnectionConf::Midl(_) => Box::new(conf.build::<h_midl::Signers>().await?),
                 ChainConnectionConf::Fuel(_) => {
                     Box::new(conf.build::<fuels::prelude::WalletUnlocked>().await?)
                 }
@@ -1233,6 +1340,10 @@ impl ChainConf {
 
     /// Build an ethereum signer
     async fn ethereum_signer(&self) -> Result<Option<h_eth::Signers>> {
+        self.signer().await
+    }
+
+    async fn midl_signer(&self) -> Result<Option<h_midl::Signers>> {
         self.signer().await
     }
 
@@ -1336,6 +1447,33 @@ impl ChainConf {
         let mut signer = None;
         if B::NEEDS_SIGNER {
             signer = self.ethereum_signer().await?;
+        }
+        let metrics_conf = self.metrics_conf();
+        let client_metrics = metrics.client_metrics();
+
+        let client_metrics = Some(client_metrics);
+        let middleware_metrics = Some((metrics.provider_metrics(), metrics_conf));
+
+        let res = builder
+            .build_with_connection_conf(conf, locator, signer, client_metrics, middleware_metrics)
+            .await;
+        Ok(res?)
+    }
+
+    /// Try to convert the chain settings into a Midl provider
+    pub async fn build_midl<B>(
+        &self,
+        conf: &h_midl::ConnectionConf,
+        locator: &ContractLocator<'_>,
+        metrics: &CoreMetrics,
+        builder: B,
+    ) -> Result<B::Output>
+    where
+        B: h_midl::BuildableWithProvider + Sync,
+    {
+        let mut signer = None;
+        if B::NEEDS_SIGNER {
+            signer = self.midl_signer().await?;
         }
         let metrics_conf = self.metrics_conf();
         let client_metrics = metrics.client_metrics();

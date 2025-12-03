@@ -43,6 +43,9 @@ impl AdapterFactory {
                 )
                 .await?,
             ),
+            ChainConnectionConf::Midl(_connection_conf) => {
+                todo!("Midl adapter support not implemented yet")
+            }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => Arc::new(SealevelAdapter::new(
                 conf.clone(),

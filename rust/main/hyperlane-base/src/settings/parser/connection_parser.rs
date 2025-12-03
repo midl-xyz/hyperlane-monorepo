@@ -7,6 +7,7 @@ use hyperlane_sealevel::{
 use url::Url;
 
 use h_eth::TransactionOverrides;
+use hyperlane_midl as h_midl;
 
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
@@ -119,6 +120,113 @@ pub fn build_ethereum_connection_conf(
         .unwrap_or_default();
 
     Some(ChainConnectionConf::Ethereum(h_eth::ConnectionConf {
+        rpc_connection: rpc_connection_conf?,
+        transaction_overrides,
+        op_submission_config: operation_batch,
+    }))
+}
+
+#[allow(clippy::question_mark)] // TODO: `rustc` 1.80.1 clippy issue
+pub fn build_midl_connection_conf(
+    rpcs: &[Url],
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+    default_rpc_consensus_type: &str,
+    operation_batch: OpSubmissionConfig,
+) -> Option<ChainConnectionConf> {
+    let Some(first_url) = rpcs.to_owned().clone().into_iter().next() else {
+        return None;
+    };
+    let rpc_consensus_type = chain
+        .chain(err)
+        .get_opt_key("rpcConsensusType")
+        .parse_string()
+        .unwrap_or(default_rpc_consensus_type);
+
+    let rpc_connection_conf = match rpc_consensus_type {
+        "single" => Some(h_midl::RpcConnectionConf::Http { url: first_url }),
+        "fallback" => Some(h_midl::RpcConnectionConf::HttpFallback {
+            urls: rpcs.to_owned().clone(),
+        }),
+        "quorum" => Some(h_midl::RpcConnectionConf::HttpQuorum {
+            urls: rpcs.to_owned().clone(),
+        }),
+        ty => Err(eyre!("unknown rpc consensus type `{ty}`"))
+            .take_err(err, || (&chain.cwp).add("rpc_consensus_type")),
+    };
+
+    let transaction_overrides = chain
+        .get_opt_key("transactionOverrides")
+        .take_err(err, || (&chain.cwp).add("transaction_overrides"))
+        .flatten()
+        .map(|value_parser| h_midl::TransactionOverrides {
+            gas_price: value_parser
+                .chain(err)
+                .get_opt_key("gasPrice")
+                .parse_u256()
+                .end(),
+            gas_limit: value_parser
+                .chain(err)
+                .get_opt_key("gasLimit")
+                .parse_u256()
+                .end(),
+            max_fee_per_gas: value_parser
+                .chain(err)
+                .get_opt_key("maxFeePerGas")
+                .parse_u256()
+                .end(),
+            max_priority_fee_per_gas: value_parser
+                .chain(err)
+                .get_opt_key("maxPriorityFeePerGas")
+                .parse_u256()
+                .end(),
+
+            min_gas_price: value_parser
+                .chain(err)
+                .get_opt_key("minGasPrice")
+                .parse_u256()
+                .end(),
+            min_fee_per_gas: value_parser
+                .chain(err)
+                .get_opt_key("minFeePerGas")
+                .parse_u256()
+                .end(),
+            min_priority_fee_per_gas: value_parser
+                .chain(err)
+                .get_opt_key("minPriorityFeePerGas")
+                .parse_u256()
+                .end(),
+
+            gas_price_multiplier_denominator: value_parser
+                .chain(err)
+                .get_opt_key("gasPriceMultiplierDenominator")
+                .parse_u256()
+                .end(),
+            gas_price_multiplier_numerator: value_parser
+                .chain(err)
+                .get_opt_key("gasPriceMultiplierNumerator")
+                .parse_u256()
+                .end(),
+            gas_price_cap_multiplier: value_parser
+                .chain(err)
+                .get_opt_key("gasPriceCapMultiplier")
+                .parse_u256()
+                .end(),
+
+            gas_price_cap: value_parser
+                .chain(err)
+                .get_opt_key("gasPriceCap")
+                .parse_u256()
+                .end(),
+            gas_limit_cap: value_parser
+                .chain(err)
+                .get_opt_key("gasLimitCap")
+                .parse_u256()
+                .end(),
+        })
+        .unwrap_or_default();
+
+    Some(ChainConnectionConf::Midl(h_midl::ConnectionConf {
         rpc_connection: rpc_connection_conf?,
         transaction_overrides,
         op_submission_config: operation_batch,
@@ -635,6 +743,13 @@ pub fn build_connection_conf(
 ) -> Option<ChainConnectionConf> {
     match domain_protocol {
         HyperlaneDomainProtocol::Ethereum => build_ethereum_connection_conf(
+            rpcs,
+            chain,
+            err,
+            default_rpc_consensus_type,
+            operation_batch,
+        ),
+        HyperlaneDomainProtocol::Midl => build_midl_connection_conf(
             rpcs,
             chain,
             err,

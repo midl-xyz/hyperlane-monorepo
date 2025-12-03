@@ -185,7 +185,9 @@ fn parse_chain(
             domain
                 .as_ref()
                 .and_then(|d| match d.domain_protocol() {
-                    HyperlaneDomainProtocol::Ethereum => Some(IndexMode::Block),
+                    HyperlaneDomainProtocol::Ethereum | HyperlaneDomainProtocol::Midl => {
+                        Some(IndexMode::Block)
+                    }
                     HyperlaneDomainProtocol::Sealevel => Some(IndexMode::Sequence),
                     _ => None,
                 })
@@ -270,6 +272,7 @@ fn parse_chain(
         Some(submitter_type) => submitter_type,
         None => match connection.protocol() {
             HyperlaneDomainProtocol::Ethereum
+            | HyperlaneDomainProtocol::Midl
             | HyperlaneDomainProtocol::Radix
             | HyperlaneDomainProtocol::Sealevel => SubmitterType::Lander,
             _ => Default::default(),

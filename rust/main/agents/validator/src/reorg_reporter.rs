@@ -13,7 +13,8 @@ use hyperlane_base::settings::ChainConnectionConf;
 use hyperlane_base::{CheckpointSyncer, CoreMetrics};
 use hyperlane_core::rpc_clients::call_and_retry_indefinitely;
 use hyperlane_core::{CheckpointAtBlock, HyperlaneDomain, MerkleTreeHook, ReorgPeriod, H256};
-use hyperlane_ethereum::RpcConnectionConf;
+use hyperlane_ethereum::RpcConnectionConf as EthRpcConnectionConf;
+use hyperlane_midl::RpcConnectionConf as MidlRpcConnectionConf;
 
 use crate::settings::ValidatorSettings;
 
@@ -149,7 +150,7 @@ impl LatestCheckpointReorgReporter {
         origin: &HyperlaneDomain,
     ) -> Vec<(Url, ValidatorSettings)> {
         use ChainConnectionConf::{
-            Aleo, Cosmos, CosmosNative, Ethereum, Fuel, Radix, Sealevel, Starknet,
+            Aleo, Cosmos, CosmosNative, Ethereum, Fuel, Midl, Radix, Sealevel, Starknet,
         };
 
         let chain_conf = settings
@@ -161,8 +162,13 @@ impl LatestCheckpointReorgReporter {
         let chain_conn_confs: Vec<(Url, ChainConnectionConf)> = match chain_conf.connection {
             Ethereum(conn) => Self::map_urls_to_connections(conn.rpc_urls(), conn, |conn, url| {
                 let mut updated_conn = conn.clone();
-                updated_conn.rpc_connection = RpcConnectionConf::Http { url };
+                updated_conn.rpc_connection = EthRpcConnectionConf::Http { url };
                 Ethereum(updated_conn)
+            }),
+            Midl(conn) => Self::map_urls_to_connections(conn.rpc_urls(), conn, |conn, url| {
+                let mut updated_conn = conn.clone();
+                updated_conn.rpc_connection = MidlRpcConnectionConf::Http { url };
+                Midl(updated_conn)
             }),
             Fuel(_) => todo!("Fuel connection not implemented"),
             Sealevel(conn) => {

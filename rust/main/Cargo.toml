@@ -9,6 +9,7 @@ members = [
   "chains/hyperlane-aleo",
   "chains/hyperlane-cosmos",
   "chains/hyperlane-ethereum",
+  "chains/hyperlane-midl",
   "chains/hyperlane-fuel",
   "chains/hyperlane-radix",
   "chains/hyperlane-sealevel",

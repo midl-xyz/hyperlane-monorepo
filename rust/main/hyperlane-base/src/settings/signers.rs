@@ -128,6 +128,49 @@ impl ChainSigner for hyperlane_ethereum::Signers {
 }
 
 #[async_trait]
+impl BuildableWithSignerConf for hyperlane_midl::Signers {
+    async fn build(conf: &SignerConf) -> Result<Self, Report> {
+        Ok(match conf {
+            SignerConf::HexKey { key } => hyperlane_midl::Signers::Local(LocalWallet::from(
+                ethers::core::k256::ecdsa::SigningKey::from(
+                    ethers::core::k256::SecretKey::from_be_bytes(key.as_bytes())
+                        .context("Invalid midl signer key")?,
+                ),
+            )),
+            SignerConf::Aws { id, region } => {
+                let http_client = utils::http_client_with_timeout()
+                    .map_err(|err| eyre::eyre!(err.to_string()))?;
+                let client = KmsClient::new_with_client(
+                    rusoto_core::Client::new_with(AwsChainCredentialsProvider::new(), http_client),
+                    region.clone(),
+                );
+                let signer = AwsSigner::new(client, id, 0, Some(AWS_SIGNER_TIMEOUT)).await?;
+                hyperlane_midl::Signers::Aws(signer)
+            }
+            SignerConf::CosmosKey { .. } => {
+                bail!("cosmosKey signer is not supported by Midl")
+            }
+            SignerConf::StarkKey { .. } => {
+                bail!("starkKey signer is not supported by Midl")
+            }
+            SignerConf::Node => bail!("Node signer"),
+            SignerConf::RadixKey { .. } => {
+                bail!("radixKey signer is not supported by Midl")
+            }
+        })
+    }
+}
+
+impl ChainSigner for hyperlane_midl::Signers {
+    fn address_string(&self) -> String {
+        ethers::signers::Signer::address(self).encode_hex()
+    }
+    fn address_h256(&self) -> H256 {
+        ethers::types::H256::from(ethers::signers::Signer::address(self)).into()
+    }
+}
+
+#[async_trait]
 impl BuildableWithSignerConf for fuels::prelude::WalletUnlocked {
     async fn build(conf: &SignerConf) -> Result<Self, Report> {
         if let SignerConf::HexKey { key } = conf {

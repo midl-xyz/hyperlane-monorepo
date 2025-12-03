@@ -195,6 +195,7 @@ pub enum KnownHyperlaneDomain {
     Merlin = 4200,
     Metal = 1000001750,
     Metis = 1088,
+    Midl = 777, // todo: update as soon as chainID is known
     MiracleChain = 92278,
     Milkyway = 1835625579,
     Mint = 185,
@@ -277,6 +278,7 @@ pub enum KnownHyperlaneDomain {
     KyveTestnet = 1262571342,
     Matchain = 698,
     MegaEthTestnet = 6342,
+    MidlTestnet = 7777, // todo: update as soon as chainID is known
     MilkywayTestnet = 1162171030,
     ModeTestnet = 919,
     MonadTestnet = 10143,
@@ -375,6 +377,8 @@ pub enum HyperlaneDomainType {
 pub enum HyperlaneDomainProtocol {
     /// An EVM-based chain type which uses hyperlane-ethereum.
     Ethereum,
+    /// A Midl-based EVM chain type which uses hyperlane-midl.
+    Midl,
     /// A Fuel-based chain type which uses hyperlane-fuel.
     Fuel,
     /// A Sealevel-based chain type which uses hyperlane-sealevel.
@@ -395,7 +399,7 @@ impl HyperlaneDomainProtocol {
     pub fn fmt_address(&self, addr: H256) -> String {
         use HyperlaneDomainProtocol::*;
         match self {
-            Ethereum => format!("{:?}", H160::from(addr)),
+            Ethereum | Midl => format!("{:?}", H160::from(addr)),
             _ => format!("{addr:?}"),
         }
     }
@@ -418,6 +422,7 @@ pub enum HyperlaneDomainTechnicalStack {
     PolygonCDK,
     PolkadotSubstrate,
     ZkSync,
+    Midl,
     #[default]
     Other,
 }
@@ -517,6 +522,7 @@ impl KnownHyperlaneDomain {
             | ParadexSepolia
             | PragmaDevnet => HyperlaneDomainProtocol::Starknet,
             Radix | RadixTestnet => HyperlaneDomainProtocol::Radix,
+            Midl | MidlTestnet => HyperlaneDomainProtocol::Midl,
             _ => HyperlaneDomainProtocol::Ethereum
         }
     }
@@ -733,7 +739,7 @@ impl HyperlaneDomain {
         use HyperlaneDomainProtocol::*;
         let protocol = self.domain_protocol();
         match protocol {
-            Ethereum | Cosmos | CosmosNative | Starknet => IndexMode::Block,
+            Ethereum | Midl | Cosmos | CosmosNative | Starknet => IndexMode::Block,
             Fuel | Sealevel | Radix | Aleo => IndexMode::Sequence,
         }
     }
@@ -903,6 +909,7 @@ mod tests {
             ("cosmos", HyperlaneDomainProtocol::Cosmos) => {}
             ("cosmosnative", HyperlaneDomainProtocol::CosmosNative) => {}
             ("ethereum", HyperlaneDomainProtocol::Ethereum) => {}
+            ("midl", HyperlaneDomainProtocol::Midl) => {}
             ("sealevel", HyperlaneDomainProtocol::Sealevel) => {}
             ("starknet", HyperlaneDomainProtocol::Starknet) => {}
             _ => {
