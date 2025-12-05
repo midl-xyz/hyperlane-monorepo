@@ -14,7 +14,10 @@ use hyperlane_core::{
     SequenceAwareIndexer, H160, H256, H512,
 };
 
-use super::utils::{fetch_raw_logs_and_meta, get_finalized_block_number};
+use super::utils::{
+    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+};
+use crate::config::MidlFinalityConf;
 use crate::interfaces::i_interchain_gas_paymaster::{
     GasPaymentFilter, IInterchainGasPaymaster as EthereumInterchainGasPaymasterInternal,
     IINTERCHAINGASPAYMASTER_ABI,
@@ -33,6 +36,7 @@ where
 pub struct InterchainGasPaymasterIndexerBuilder {
     pub mailbox_address: H160,
     pub reorg_period: EthereumReorgPeriod,
+    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -50,6 +54,7 @@ impl BuildableWithProvider for InterchainGasPaymasterIndexerBuilder {
             Arc::new(provider),
             locator,
             self.reorg_period,
+            self.finality.clone(),
         ))
     }
 }
@@ -63,6 +68,7 @@ where
     contract: Arc<EthereumInterchainGasPaymasterInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
+    finality: Option<MidlFinalityConf>,
 }
 
 impl<M> EthereumInterchainGasPaymasterIndexer<M>
@@ -74,6 +80,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
+        finality: Option<MidlFinalityConf>,
     ) -> Self {
         Self {
             contract: Arc::new(EthereumInterchainGasPaymasterInternal::new(
@@ -82,6 +89,7 @@ where
             )),
             provider,
             reorg_period,
+            finality,
         }
     }
 }
@@ -123,6 +131,9 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
+        if let Some(conf) = &self.finality {
+            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }
 

@@ -1,5 +1,5 @@
 use ethers::providers::Middleware;
-use ethers_core::types::{BlockId, BlockNumber};
+use ethers_core::types::{BlockId, BlockNumber, Bytes, H160};
 use url::Url;
 
 use hyperlane_core::{
@@ -49,6 +49,10 @@ pub struct ConnectionConf {
     pub transaction_overrides: TransactionOverrides,
     /// Operation batching configuration
     pub op_submission_config: OpSubmissionConfig,
+    /// Optional Midl execution configuration for write transactions.
+    pub execution: Option<MidlExecutionConf>,
+    /// Optional BTC-finality configuration.
+    pub finality: Option<MidlFinalityConf>,
 }
 
 impl ConnectionConf {
@@ -109,6 +113,28 @@ pub struct TransactionOverrides {
     pub gas_price_cap: Option<U256>,
     /// Gas limit cap, in wei.
     pub gas_limit_cap: Option<U256>,
+}
+
+/// Static Midl metadata used for transaction rewriting.
+#[derive(Clone, Debug)]
+pub struct MidlStaticMetadata {
+    pub btc_tx_hash: H256,
+    pub btc_transaction: Bytes,
+    pub public_key: Bytes,
+    pub btc_address_byte: U256,
+}
+
+/// Configuration for rewriting write transactions into Midl bundles.
+#[derive(Clone, Debug, Default)]
+pub struct MidlExecutionConf {
+    pub static_metadata: Option<MidlStaticMetadata>,
+}
+
+/// Configuration describing how to translate BTC confirmations into finalized blocks.
+#[derive(Clone, Debug)]
+pub struct MidlFinalityConf {
+    pub executor_address: H160,
+    pub btc_confirmations: u64,
 }
 
 /// Ethereum reorg period

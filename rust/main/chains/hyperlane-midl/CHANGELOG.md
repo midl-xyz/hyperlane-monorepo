@@ -12,3 +12,5 @@
 * fix: Lander nonce add logs (#7260)
 * fix: Request more fee history percentiles if default one returned zeros (#7047)
 * refactor: align radix custom rpc header with evm implementation (#7110)
+* feat: enable Midl transaction rewriting and batched `eth_sendBTCTransactions` submissions
+* feat: add execution/finality config for Midl (static metadata + executor confirmations)

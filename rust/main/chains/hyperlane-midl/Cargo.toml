@@ -21,6 +21,7 @@ futures-util.workspace = true
 hex.workspace = true
 hex-literal.workspace = true
 itertools.workspace = true
+once_cell.workspace = true
 num.workspace = true
 num-traits.workspace = true
 reqwest.workspace = true

@@ -16,13 +16,16 @@ use hyperlane_core::{
     MerkleTreeHook, MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512,
 };
 
+use crate::config::MidlFinalityConf;
 use crate::interfaces::merkle_tree_hook::{
     InsertedIntoTreeFilter, MerkleTreeHook as MerkleTreeHookContract, Tree,
 };
 use crate::tx::call_with_reorg_period;
 use crate::{BuildableWithProvider, ConnectionConf, EthereumProvider, EthereumReorgPeriod};
 
-use super::utils::{fetch_raw_logs_and_meta, get_finalized_block_number};
+use super::utils::{
+    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+};
 
 // We don't need the reverse of this impl, so it's ok to disable the clippy lint
 #[allow(clippy::from_over_into)]
@@ -60,6 +63,7 @@ impl BuildableWithProvider for MerkleTreeHookBuilder {
 
 pub struct MerkleTreeHookIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -77,6 +81,7 @@ impl BuildableWithProvider for MerkleTreeHookIndexerBuilder {
             Arc::new(provider),
             locator,
             self.reorg_period,
+            self.finality.clone(),
         ))
     }
 }
@@ -90,6 +95,7 @@ where
     contract: Arc<MerkleTreeHookContract<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
+    finality: Option<MidlFinalityConf>,
 }
 
 impl<M> EthereumMerkleTreeHookIndexer<M>
@@ -101,6 +107,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
+        finality: Option<MidlFinalityConf>,
     ) -> Self {
         Self {
             contract: Arc::new(MerkleTreeHookContract::new(
@@ -109,6 +116,7 @@ where
             )),
             provider,
             reorg_period,
+            finality,
         }
     }
 }
@@ -146,6 +154,9 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
+        if let Some(conf) = &self.finality {
+            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }
 

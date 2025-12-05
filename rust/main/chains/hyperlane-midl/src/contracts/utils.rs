@@ -5,10 +5,13 @@ use ethers::{
     providers::Middleware,
     types::{H160 as EthersH160, H256 as EthersH256},
 };
-use ethers_contract::{ContractError, EthEvent, LogMeta as EthersLogMeta};
+use ethers_contract::{Contract, ContractError, EthEvent, LogMeta as EthersLogMeta};
+use ethers_core::{abi::Abi, types::U256};
 use hyperlane_core::{ChainCommunicationError, ChainResult, LogMeta, H512};
+use once_cell::sync::Lazy;
+use serde_json::from_str;
 
-use crate::EthereumReorgPeriod;
+use crate::{config::MidlFinalityConf, EthereumReorgPeriod};
 
 pub async fn fetch_raw_logs_and_meta<T: EthEvent, M>(
     tx_hash: H512,
@@ -75,4 +78,33 @@ where
     };
 
     Ok(number)
+}
+
+static EXECUTOR_ABI: Lazy<Abi> = Lazy::new(|| {
+    from_str(
+        r#"[{"inputs":[],"name":"lastCommittedMidlBlock","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]"#,
+    )
+    .expect("executor ABI")
+});
+
+pub async fn get_midl_finalized_block_number<M>(
+    provider: Arc<M>,
+    finality: &MidlFinalityConf,
+) -> ChainResult<u32>
+where
+    M: Middleware + 'static,
+{
+    let contract =
+        Contract::new(finality.executor_address, EXECUTOR_ABI.clone(), provider.clone());
+    let last_committed: U256 = contract
+        .method::<_, U256>("lastCommittedMidlBlock", ())
+        .map_err(ChainCommunicationError::from_other)?
+        .call()
+        .await
+        .map_err(ChainCommunicationError::from_other)?;
+
+    let confirmations = finality.btc_confirmations.saturating_sub(1);
+    let finalized = last_committed.saturating_sub(U256::from(confirmations));
+    u32::try_from(finalized)
+        .map_err(|_| ChainCommunicationError::CustomError("finalized block overflow".into()))
 }

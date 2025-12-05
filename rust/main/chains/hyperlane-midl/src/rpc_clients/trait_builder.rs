@@ -31,6 +31,9 @@ use hyperlane_metric::prometheus_metric::{
 };
 use tracing::instrument;
 
+use crate::rpc_clients::tx_rewrite_middleware::{
+    MidlPreparedMetadata, StaticMidlMetadataProvider, TxRewriteMiddleware,
+};
 use crate::signer::Signers;
 use crate::tx::PENDING_TX_TIMEOUT_SECS;
 use crate::{ConnectionConf, EthereumFallbackProvider, RetryingProvider, RpcConnectionConf};
@@ -208,12 +211,18 @@ pub trait BuildableWithProvider {
     where
         M: Middleware + 'static,
     {
+        let metadata_provider = build_metadata_provider(conn);
+        let provider = TxRewriteMiddleware::new(provider, metadata_provider);
+
         let Some(signer) = signer else {
             return Ok(self.build_with_provider(provider, conn, locator).await);
         };
-        let signing_provider = wrap_with_signer(provider, signer.clone())
+        let chain_id = provider
+            .get_chainid()
             .await
             .map_err(ChainCommunicationError::from_other)?;
+        let signer = ethers::signers::Signer::with_chain_id(signer, chain_id.as_u64());
+        let signing_provider = SignerMiddleware::new(provider, signer);
 
         if !self.uses_ethers_submission_middleware() {
             // don't wrap the signing provider in any middlewares
@@ -245,16 +254,6 @@ pub trait BuildableWithProvider {
     ) -> Self::Output
     where
         M: Middleware + 'static;
-}
-
-async fn wrap_with_signer<M: Middleware>(
-    provider: M,
-    signer: Signers,
-) -> Result<SignerMiddleware<M, Signers>, M::Error> {
-    let provider_chain_id = provider.get_chainid().await?;
-    let signer = ethers::signers::Signer::with_chain_id(signer, provider_chain_id.as_u64());
-
-    Ok(SignerMiddleware::new(provider, signer))
 }
 
 async fn wrap_with_nonce_manager<M: Middleware>(
@@ -336,6 +335,23 @@ fn get_reqwest_client(url: &Url) -> ChainResult<Client> {
         .map_err(EthereumProviderConnectionError::from)?;
     client_cache.insert(url.clone(), client.clone());
     Ok(client)
+}
+
+fn build_metadata_provider(
+    conn: &ConnectionConf,
+) -> Option<Arc<dyn crate::rpc_clients::tx_rewrite_middleware::MidlMetadataProvider>> {
+    let metadata = conn
+        .execution
+        .as_ref()
+        .and_then(|conf| conf.static_metadata.as_ref())?;
+
+    let prepared = MidlPreparedMetadata {
+        btc_tx_hash: metadata.btc_tx_hash,
+        btc_transaction: metadata.btc_transaction.clone(),
+        public_key: metadata.public_key.clone(),
+        btc_address_byte: metadata.btc_address_byte,
+    };
+    Some(Arc::new(StaticMidlMetadataProvider::new(prepared)))
 }
 
 /// A cache for reqwest clients, indexed by URL.

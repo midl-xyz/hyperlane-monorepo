@@ -1,6 +1,8 @@
-use std::ops::Add;
+use std::{ops::Add, str::FromStr};
 
 use eyre::eyre;
+use hex;
+use ethers_core::types::Bytes;
 use hyperlane_sealevel::{
     HeliusPriorityFeeLevel, HeliusPriorityFeeOracleConfig, PriorityFeeOracleConfig,
 };
@@ -10,7 +12,10 @@ use h_eth::TransactionOverrides;
 use hyperlane_midl as h_midl;
 
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
-use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
+use hyperlane_core::utils::hex_or_base58_or_bech32_to_h256;
+use hyperlane_core::{
+    config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken, H160,
+};
 
 use hyperlane_starknet as h_starknet;
 
@@ -226,10 +231,15 @@ pub fn build_midl_connection_conf(
         })
         .unwrap_or_default();
 
+    let execution = parse_midl_execution_conf(chain, err);
+    let finality = parse_midl_finality_conf(chain, err);
+
     Some(ChainConnectionConf::Midl(h_midl::ConnectionConf {
         rpc_connection: rpc_connection_conf?,
         transaction_overrides,
         op_submission_config: operation_batch,
+        execution,
+        finality,
     }))
 }
 
@@ -571,6 +581,120 @@ fn parse_transaction_submitter_config(
         // If not specified at all, use default
         Some(h_sealevel::config::TransactionSubmitterConfig::default())
     }
+}
+
+fn parse_midl_execution_conf(
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+) -> Option<h_midl::MidlExecutionConf> {
+    let exec_parser = chain
+        .get_opt_key("midlExecution")
+        .take_err(err, || (&chain.cwp).add("midlExecution"))
+        .flatten()?;
+
+    let static_metadata = exec_parser
+        .get_opt_key("staticMetadata")
+        .take_err(err, || (&exec_parser.cwp).add("staticMetadata"))
+        .flatten()
+        .and_then(|parser| parse_static_metadata(parser, err));
+
+    static_metadata.map(|metadata| h_midl::MidlExecutionConf {
+        static_metadata: Some(metadata),
+    })
+}
+
+fn parse_static_metadata(
+    parser: &ValueParser,
+    err: &mut ConfigParsingError,
+) -> Option<h_midl::MidlStaticMetadata> {
+    let btc_tx_hash = parser
+        .chain(err)
+        .get_key("btcTxHash")
+        .parse_string()
+        .end()
+        .and_then(|value| {
+            hex_or_base58_or_bech32_to_h256(value)
+                .map_err(|e| err.push((&parser.cwp).add("btcTxHash"), eyre!(e)))
+                .ok()
+        })?;
+
+    let btc_transaction = parse_bytes_field(parser, "btcTransaction", err)?;
+    let public_key = parse_bytes_field(parser, "publicKey", err)?;
+
+    if public_key.len() != 32 {
+        err.push(
+            (&parser.cwp).add("publicKey"),
+            eyre!("expected 32-byte public key"),
+        );
+        return None;
+    }
+
+    let btc_address_byte = parser
+        .chain(err)
+        .get_key("btcAddressByte")
+        .parse_u256()
+        .end()?;
+
+    Some(h_midl::MidlStaticMetadata {
+        btc_tx_hash,
+        btc_transaction,
+        public_key,
+        btc_address_byte,
+    })
+}
+
+fn parse_bytes_field(
+    parser: &ValueParser,
+    key: &str,
+    err: &mut ConfigParsingError,
+) -> Option<Bytes> {
+    let value = parser
+        .chain(err)
+        .get_key(key)
+        .parse_string()
+        .end()?;
+    let raw = value.strip_prefix("0x").unwrap_or(value);
+    match hex::decode(raw) {
+        Ok(bytes) => Some(Bytes::from(bytes)),
+        Err(e) => {
+            err.push((&parser.cwp).add(key), eyre!("invalid hex: {e}"));
+            None
+        }
+    }
+}
+
+fn parse_midl_finality_conf(
+    chain: &ValueParser,
+    err: &mut ConfigParsingError,
+) -> Option<h_midl::MidlFinalityConf> {
+    let parser = chain
+        .get_opt_key("midlFinality")
+        .take_err(err, || (&chain.cwp).add("midlFinality"))
+        .flatten()?;
+
+    let executor_address = parser
+        .chain(err)
+        .get_key("executorAddress")
+        .parse_string()
+        .end()
+        .and_then(|value| {
+            H160::from_str(value)
+                .map_err(|e| err.push((&parser.cwp).add("executorAddress"), eyre!(e)))
+                .ok()
+        })?;
+
+    let btc_confirmations = parser
+        .chain(err)
+        .get_opt_key("btcConfirmations")
+        .parse_u64()
+        .end()
+        .unwrap_or(6)
+        .max(1);
+
+    Some(h_midl::MidlFinalityConf {
+        executor_address,
+        btc_confirmations,
+    })
 }
 
 pub fn build_radix_connection_conf(

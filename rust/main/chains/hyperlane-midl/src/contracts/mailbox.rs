@@ -26,6 +26,7 @@ use hyperlane_core::{
     ReorgPeriod, SequenceAwareIndexer, TxCostEstimate, TxOutcome, H160, H256, H512, U256,
 };
 
+use crate::config::MidlFinalityConf;
 use crate::error::HyperlaneEthereumError;
 use crate::interfaces::arbitrum_node_interface::ArbitrumNodeInterface;
 use crate::interfaces::i_mailbox::{IMailbox as EthereumMailboxInternal, IMAILBOX_ABI};
@@ -39,7 +40,9 @@ use crate::{
 };
 
 use super::multicall::{self, build_multicall, BatchCache};
-use super::utils::{fetch_raw_logs_and_meta, get_finalized_block_number};
+use super::utils::{
+    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+};
 
 impl<M> std::fmt::Display for EthereumMailboxInternal<M>
 where
@@ -52,6 +55,7 @@ where
 
 pub struct SequenceIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -69,12 +73,14 @@ impl BuildableWithProvider for SequenceIndexerBuilder {
             Arc::new(provider),
             locator,
             self.reorg_period,
+            self.finality.clone(),
         ))
     }
 }
 
 pub struct DeliveryIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -92,6 +98,7 @@ impl BuildableWithProvider for DeliveryIndexerBuilder {
             Arc::new(provider),
             locator,
             self.reorg_period,
+            self.finality.clone(),
         ))
     }
 }
@@ -105,6 +112,7 @@ where
     contract: Arc<EthereumMailboxInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
+    finality: Option<MidlFinalityConf>,
 }
 
 impl<M> EthereumMailboxIndexer<M>
@@ -116,6 +124,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
+        finality: Option<MidlFinalityConf>,
     ) -> Self {
         let contract = Arc::new(EthereumMailboxInternal::new(
             locator.address,
@@ -125,10 +134,14 @@ where
             contract,
             provider,
             reorg_period,
+            finality,
         }
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
+        if let Some(conf) = &self.finality {
+            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }
 }
@@ -739,6 +752,8 @@ mod test {
             },
             transaction_overrides: Default::default(),
             op_submission_config: Default::default(),
+            execution: None,
+            finality: None,
         };
 
         let mailbox = EthereumMailbox::new(

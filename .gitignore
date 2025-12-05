@@ -41,3 +41,7 @@ yalc.lock
 **/warp-route-deployer-key.json
 **/key.json
 **/deployer-key.json
+
+# Relayer configuration
+config/default.json
+relayer-db/
