@@ -6205,6 +6205,7 @@ dependencies = [
  "itertools 0.10.5",
  "num 0.4.3",
  "num-traits",
+ "once_cell",
  "reqwest 0.11.27",
  "reqwest-utils",
  "serde",
