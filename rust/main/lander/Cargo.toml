@@ -11,6 +11,7 @@ version.workspace = true
 hyperlane-base = { path = "../hyperlane-base", features = ["test-utils"] }
 hyperlane-core = { path = "../hyperlane-core" }
 hyperlane-ethereum = { path = "../chains/hyperlane-ethereum" }
+hyperlane-midl = { path = "../chains/hyperlane-midl" }
 hyperlane-radix = { path = "../chains/hyperlane-radix" }
 hyperlane-sealevel = { path = "../chains/hyperlane-sealevel" }
 

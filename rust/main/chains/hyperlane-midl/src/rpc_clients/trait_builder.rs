@@ -18,6 +18,8 @@ use hyperlane_core::rpc_clients::FallbackProvider;
 use hyperlane_metric::utils::url_to_host_info;
 use reqwest::{Client, Url};
 use reqwest_utils::parse_custom_rpc_headers;
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use ethers_prometheus::json_rpc_client::{JsonRpcBlockGetter, PrometheusJsonRpcClient};
@@ -40,6 +42,82 @@ use crate::{ConnectionConf, EthereumFallbackProvider, RetryingProvider, RpcConne
 
 // This should be whatever the prometheus scrape interval is
 const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// JsonRpcClient wrapper that canonicalizes EVM QUANTITY fields for MIDL RPC servers.
+///
+/// Some Go JSON-RPC implementations reject `"type": "0x02"` (leading zero digits) and only accept
+/// canonical quantities like `"0x2"` (or `"0x0"`).
+///
+/// We only adjust the `"type"` field inside the first transaction object param for a small set of
+/// methods that take a tx-like object.
+#[derive(Clone, Debug)]
+struct CanonicalizeTxTypeClient<C> {
+    inner: C,
+}
+
+impl<C> CanonicalizeTxTypeClient<C> {
+    fn new(inner: C) -> Self {
+        Self { inner }
+    }
+
+    fn canonicalize_hex_quantity_str(s: &str) -> Option<String> {
+        let hex = s.strip_prefix("0x")?;
+        // strip leading zero digits, leaving at least one digit
+        let stripped = hex.trim_start_matches('0');
+        let digits = if stripped.is_empty() { "0" } else { stripped };
+        Some(format!("0x{digits}"))
+    }
+
+    fn maybe_fix_tx_type(method: &str, params: &mut Value) {
+        // Methods that take a tx object as first param.
+        // Keep this tight to avoid unexpected behavior.
+        const METHODS: &[&str] = &["eth_call", "eth_estimateGas", "eth_sendTransaction"];
+        if !METHODS.contains(&method) {
+            return;
+        }
+
+        let Some(arr) = params.as_array_mut() else {
+            return;
+        };
+        let Some(first) = arr.first_mut() else {
+            return;
+        };
+        let Some(obj) = first.as_object_mut() else {
+            return;
+        };
+        let Some(Value::String(s)) = obj.get("type") else {
+            return;
+        };
+        if let Some(canon) = Self::canonicalize_hex_quantity_str(s) {
+            obj.insert("type".to_string(), Value::String(canon));
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<C> JsonRpcClient for CanonicalizeTxTypeClient<C>
+where
+    C: JsonRpcClient<Error = ethers::providers::HttpClientError> + Clone + Send + Sync,
+{
+    type Error = ethers::providers::HttpClientError;
+
+    async fn request<T, R>(&self, method: &str, params: T) -> Result<R, Self::Error>
+    where
+        T: Debug + Serialize + Send + Sync,
+        R: DeserializeOwned,
+    {
+        let mut params_value = serde_json::to_value(&params).map_err(|err| {
+            // Match the error type used by the underlying HTTP JsonRpcClient.
+            ethers::providers::HttpClientError::SerdeJson {
+                err,
+                text: "failed to serialize json-rpc params".to_string(),
+            }
+        })?;
+        Self::maybe_fix_tx_type(method, &mut params_value);
+        self.inner.request(method, params_value).await
+    }
+}
 
 /// An error when connecting to an ethereum provider.
 #[derive(Error, Debug)]
@@ -89,7 +167,7 @@ pub trait BuildableWithProvider {
             RpcConnectionConf::HttpQuorum { urls } => {
                 let mut builder = QuorumProvider::builder().quorum(Quorum::Majority);
                 for url in urls {
-                    let http_provider = build_http_provider(url.clone())?;
+                let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                     // Wrap the inner providers as RetryingProviders rather than the QuorumProvider.
                     // We've observed issues where the QuorumProvider will first get the latest
                     // block number and then submit an RPC at that block height,
@@ -116,7 +194,7 @@ pub trait BuildableWithProvider {
             RpcConnectionConf::HttpFallback { urls } => {
                 let mut builder = FallbackProvider::builder();
                 for url in urls {
-                    let http_provider = build_http_provider(url.clone())?;
+                let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                     let metrics_provider = self.wrap_rpc_with_metrics(
                         http_provider,
                         url.clone(),
@@ -126,15 +204,12 @@ pub trait BuildableWithProvider {
                     builder = builder.add_provider(metrics_provider);
                 }
                 let fallback_provider = builder.build();
-                let ethereum_fallback_provider = EthereumFallbackProvider::<
-                    _,
-                    JsonRpcBlockGetter<PrometheusJsonRpcClient<Http>>,
-                >::new(fallback_provider);
+            let ethereum_fallback_provider = EthereumFallbackProvider::new(fallback_provider);
                 self.build(ethereum_fallback_provider, conn, locator, signer)
                     .await?
             }
             RpcConnectionConf::Http { url } => {
-                let http_provider = build_http_provider(url.clone())?;
+            let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                 let metrics_provider = self.wrap_rpc_with_metrics(
                     http_provider,
                     url.clone(),

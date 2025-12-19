@@ -1,7 +1,7 @@
 // TODO: re-enable clippy warnings
 #![allow(unused_imports)]
 
-pub use chains::{AdapterFactory, EthereumTxPrecursor, RadixTxPrecursor, SealevelTxPrecursor};
+pub use chains::{AdapterFactory, EthereumTxPrecursor, MidlAdapter, RadixTxPrecursor, SealevelTxPrecursor};
 pub use core::{AdaptsChain, AdaptsChainAction, GasLimit, TxBuildingResult};
 
 pub mod chains;

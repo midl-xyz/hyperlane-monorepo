@@ -15,7 +15,7 @@ use hyperlane_radix::RadixProvider;
 use crate::adapter::{
     chains::{
         cosmos::CosmosAdapter, ethereum::EthereumAdapter, radix::adapter::RadixAdapter,
-        sealevel::SealevelAdapter,
+        sealevel::SealevelAdapter, MidlAdapter,
     },
     AdaptsChain,
 };
@@ -44,7 +44,17 @@ impl AdapterFactory {
                 .await?,
             ),
             ChainConnectionConf::Midl(_connection_conf) => {
-                todo!("Midl adapter support not implemented yet")
+                Arc::new(
+                    MidlAdapter::new(
+                        conf.clone(),
+                        _connection_conf,
+                        raw_conf.clone(),
+                        db,
+                        core_metrics,
+                        dispatcher_metrics,
+                    )
+                    .await?,
+                )
             }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => Arc::new(SealevelAdapter::new(
