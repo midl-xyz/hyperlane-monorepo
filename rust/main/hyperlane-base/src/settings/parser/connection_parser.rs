@@ -596,6 +596,7 @@ fn parse_midl_execution_conf(
         .get_opt_key("staticMetadata")
         .take_err(err, || (&exec_parser.cwp).add("staticMetadata"))
         .flatten()
+        .as_ref()
         .and_then(|parser| parse_static_metadata(parser, err));
 
     static_metadata.map(|metadata| h_midl::MidlExecutionConf {
@@ -692,7 +693,7 @@ fn parse_midl_finality_conf(
         .max(1);
 
     Some(h_midl::MidlFinalityConf {
-        executor_address,
+        executor_address: executor_address.into(),
         btc_confirmations,
     })
 }

@@ -94,8 +94,11 @@ pub async fn get_midl_finalized_block_number<M>(
 where
     M: Middleware + 'static,
 {
-    let contract =
-        Contract::new(finality.executor_address, EXECUTOR_ABI.clone(), provider.clone());
+    let contract: Contract<M> = Contract::new(
+        finality.executor_address,
+        EXECUTOR_ABI.clone(),
+        provider.clone(),
+    );
     let last_committed: U256 = contract
         .method::<_, U256>("lastCommittedMidlBlock", ())
         .map_err(ChainCommunicationError::from_other)?

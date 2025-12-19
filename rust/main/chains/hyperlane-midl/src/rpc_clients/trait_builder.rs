@@ -222,6 +222,7 @@ pub trait BuildableWithProvider {
             .await
             .map_err(ChainCommunicationError::from_other)?;
         let signer = ethers::signers::Signer::with_chain_id(signer, chain_id.as_u64());
+        let signer_address = signer.address();
         let signing_provider = SignerMiddleware::new(provider, signer);
 
         if !self.uses_ethers_submission_middleware() {
@@ -236,7 +237,7 @@ pub trait BuildableWithProvider {
         // We keep nonce manager as the outermost middleware, so that resubmitting a tx with a higher gas price reuses its initial nonce.
         let gas_escalator_provider = wrap_with_gas_escalator(signing_provider);
         let gas_oracle_provider = wrap_with_gas_oracle(gas_escalator_provider, locator.domain)?;
-        let nonce_manager_provider = wrap_with_nonce_manager(gas_oracle_provider, signer.address())
+        let nonce_manager_provider = wrap_with_nonce_manager(gas_oracle_provider, signer_address)
             .await
             .map_err(ChainCommunicationError::from_other)?;
 
@@ -349,7 +350,7 @@ fn build_metadata_provider(
         btc_tx_hash: metadata.btc_tx_hash,
         btc_transaction: metadata.btc_transaction.clone(),
         public_key: metadata.public_key.clone(),
-        btc_address_byte: metadata.btc_address_byte,
+        btc_address_byte: metadata.btc_address_byte.into(),
     };
     Some(Arc::new(StaticMidlMetadataProvider::new(prepared)))
 }
