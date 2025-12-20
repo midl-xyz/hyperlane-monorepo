@@ -4,7 +4,7 @@ use ethers::{
     abi::Function,
     types::{transaction::eip2718::TypedTransaction, H160},
 };
-use ethers_core::types::transaction::eip2718::TypedTransaction::{Eip1559, Eip2930, Legacy};
+use ethers_core::types::transaction::eip2718::TypedTransaction::{Eip1559, Eip2930, Legacy, Midl};
 
 use crate::payload::{FullPayload, PayloadDetails};
 
@@ -90,6 +90,12 @@ impl EthereumTxPrecursor {
                 },
                 _ => GasPrice::None,
             },
+            Midl(r) => match r.tx.gas_price {
+                Some(gas_price) => GasPrice::NonEip1559 {
+                    gas_price: gas_price.into(),
+                },
+                None => GasPrice::None,
+            },
         }
     }
 
@@ -98,6 +104,7 @@ impl EthereumTxPrecursor {
             Legacy(_) => "legacy".to_string(),
             Eip2930(_) => "eip2930".to_string(),
             Eip1559(_) => "eip1559".to_string(),
+            Midl(_) => "midl".to_string(),
         }
     }
 }
