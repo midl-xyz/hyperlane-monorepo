@@ -17,9 +17,11 @@ pub use trait_builder::*;
 pub use utils::*;
 pub use validator_announce::*;
 
+/// Auto-generated contract bindings.
 #[rustfmt::skip]
 #[allow(clippy::all)]
 #[allow(clippy::arithmetic_side_effects)]
+#[allow(missing_docs)]
 pub mod contracts;
 
 /// Application specific functionality
