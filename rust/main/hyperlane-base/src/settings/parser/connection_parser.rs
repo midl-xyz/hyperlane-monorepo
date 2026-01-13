@@ -1,8 +1,8 @@
 use std::{ops::Add, str::FromStr};
 
+use ethers_core::types::Bytes;
 use eyre::eyre;
 use hex;
-use ethers_core::types::Bytes;
 use hyperlane_sealevel::{
     HeliusPriorityFeeLevel, HeliusPriorityFeeOracleConfig, PriorityFeeOracleConfig,
 };
@@ -13,9 +13,7 @@ use hyperlane_midl as h_midl;
 
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::utils::hex_or_base58_or_bech32_to_h256;
-use hyperlane_core::{
-    config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken, H160,
-};
+use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken, H160};
 
 use hyperlane_starknet as h_starknet;
 
@@ -590,7 +588,12 @@ fn parse_midl_execution_conf(
     let exec_parser = chain
         .get_opt_key("midlExecution")
         .take_err(err, || (&chain.cwp).add("midlExecution"))
-        .flatten()?;
+        .flatten();
+
+    let Some(exec_parser) = exec_parser else {
+        // No midlExecution config - return None (will use defaults when btcKey signer is present)
+        return None;
+    };
 
     let static_metadata = exec_parser
         .get_opt_key("staticMetadata")
@@ -599,8 +602,31 @@ fn parse_midl_execution_conf(
         .as_ref()
         .and_then(|parser| parse_static_metadata(parser, err));
 
-    static_metadata.map(|metadata| h_midl::MidlExecutionConf {
-        static_metadata: Some(metadata),
+    let btc_fee_rate_sat_per_vbyte = exec_parser
+        .chain(err)
+        .get_opt_key("btcFeeRateSatPerVbyte")
+        .parse_u64()
+        .end();
+
+    let mempool_url = exec_parser
+        .chain(err)
+        .get_opt_key("mempoolUrl")
+        .parse_string()
+        .end()
+        .map(|s| s.to_owned());
+
+    let min_confirmations = exec_parser
+        .chain(err)
+        .get_opt_key("minConfirmations")
+        .parse_u64()
+        .end();
+
+    // Return config if any field is specified
+    Some(h_midl::MidlExecutionConf {
+        static_metadata,
+        btc_fee_rate_sat_per_vbyte,
+        mempool_url,
+        min_confirmations,
     })
 }
 
@@ -649,11 +675,7 @@ fn parse_bytes_field(
     key: &str,
     err: &mut ConfigParsingError,
 ) -> Option<Bytes> {
-    let value = parser
-        .chain(err)
-        .get_key(key)
-        .parse_string()
-        .end()?;
+    let value = parser.chain(err).get_key(key).parse_string().end()?;
     let raw = value.strip_prefix("0x").unwrap_or(value);
     match hex::decode(raw) {
         Ok(bytes) => Some(Bytes::from(bytes)),

@@ -127,7 +127,19 @@ pub struct MidlStaticMetadata {
 /// Configuration for rewriting write transactions into Midl bundles.
 #[derive(Clone, Debug, Default)]
 pub struct MidlExecutionConf {
+    /// Static metadata for when not using a BTC signer (e.g., testing or external BTC management)
     pub static_metadata: Option<MidlStaticMetadata>,
+    /// BTC fee rate in satoshis per virtual byte for dynamic transaction building.
+    /// Only used when a btcKey signer is configured.
+    /// Defaults to 10 sat/vbyte if not specified.
+    pub btc_fee_rate_sat_per_vbyte: Option<u64>,
+    /// Mempool API URL for fetching UTXOs and fee rates.
+    /// Should be a mempool.space-compatible API (e.g., "https://mempool.space").
+    /// If not specified, dynamic UTXO fetching is disabled.
+    pub mempool_url: Option<String>,
+    /// Minimum confirmations required for UTXOs to be considered spendable.
+    /// Defaults to 1 if not specified.
+    pub min_confirmations: Option<u64>,
 }
 
 /// Configuration describing how to translate BTC confirmations into finalized blocks.

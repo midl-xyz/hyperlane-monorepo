@@ -43,19 +43,17 @@ impl AdapterFactory {
                 )
                 .await?,
             ),
-            ChainConnectionConf::Midl(_connection_conf) => {
-                Arc::new(
-                    MidlAdapter::new(
-                        conf.clone(),
-                        _connection_conf,
-                        raw_conf.clone(),
-                        db,
-                        core_metrics,
-                        dispatcher_metrics,
-                    )
-                    .await?,
+            ChainConnectionConf::Midl(_connection_conf) => Arc::new(
+                MidlAdapter::new(
+                    conf.clone(),
+                    _connection_conf,
+                    raw_conf.clone(),
+                    db,
+                    core_metrics,
+                    dispatcher_metrics,
                 )
-            }
+                .await?,
+            ),
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(_) => Arc::new(SealevelAdapter::new(
                 conf.clone(),

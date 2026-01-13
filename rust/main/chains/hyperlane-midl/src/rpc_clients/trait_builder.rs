@@ -22,7 +22,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use ethers_prometheus::json_rpc_client::{JsonRpcBlockGetter, PrometheusJsonRpcClient};
+use ethers_prometheus::json_rpc_client::PrometheusJsonRpcClient;
 use ethers_prometheus::middleware::{MiddlewareMetrics, PrometheusMiddlewareConf};
 use hyperlane_core::{
     ChainCommunicationError, ChainResult, ContractLocator, HyperlaneDomain, KnownHyperlaneDomain,
@@ -34,8 +34,10 @@ use hyperlane_metric::prometheus_metric::{
 use tracing::instrument;
 
 use crate::rpc_clients::tx_rewrite_middleware::{
-    MidlPreparedMetadata, StaticMidlMetadataProvider, TxRewriteMiddleware,
+    BtcSignerMidlMetadataProvider, BtcUtxo, MidlMetadataProvider, MidlPreparedMetadata,
+    StaticMidlMetadataProvider, TxRewriteMiddleware, UtxoProvider,
 };
+use crate::rpc_clients::MempoolUtxoProvider;
 use crate::signer::Signers;
 use crate::tx::PENDING_TX_TIMEOUT_SECS;
 use crate::{ConnectionConf, EthereumFallbackProvider, RetryingProvider, RpcConnectionConf};
@@ -167,7 +169,8 @@ pub trait BuildableWithProvider {
             RpcConnectionConf::HttpQuorum { urls } => {
                 let mut builder = QuorumProvider::builder().quorum(Quorum::Majority);
                 for url in urls {
-                let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
+                    let http_provider =
+                        CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                     // Wrap the inner providers as RetryingProviders rather than the QuorumProvider.
                     // We've observed issues where the QuorumProvider will first get the latest
                     // block number and then submit an RPC at that block height,
@@ -194,7 +197,8 @@ pub trait BuildableWithProvider {
             RpcConnectionConf::HttpFallback { urls } => {
                 let mut builder = FallbackProvider::builder();
                 for url in urls {
-                let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
+                    let http_provider =
+                        CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                     let metrics_provider = self.wrap_rpc_with_metrics(
                         http_provider,
                         url.clone(),
@@ -204,12 +208,13 @@ pub trait BuildableWithProvider {
                     builder = builder.add_provider(metrics_provider);
                 }
                 let fallback_provider = builder.build();
-            let ethereum_fallback_provider = EthereumFallbackProvider::new(fallback_provider);
+                let ethereum_fallback_provider = EthereumFallbackProvider::new(fallback_provider);
                 self.build(ethereum_fallback_provider, conn, locator, signer)
                     .await?
             }
             RpcConnectionConf::Http { url } => {
-            let http_provider = CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
+                let http_provider =
+                    CanonicalizeTxTypeClient::new(build_http_provider(url.clone())?);
                 let metrics_provider = self.wrap_rpc_with_metrics(
                     http_provider,
                     url.clone(),
@@ -286,7 +291,7 @@ pub trait BuildableWithProvider {
     where
         M: Middleware + 'static,
     {
-        let metadata_provider = build_metadata_provider(conn);
+        let metadata_provider = build_metadata_provider(conn, signer.as_ref());
         let provider = TxRewriteMiddleware::new(provider, metadata_provider);
 
         let Some(signer) = signer else {
@@ -413,9 +418,63 @@ fn get_reqwest_client(url: &Url) -> ChainResult<Client> {
     Ok(client)
 }
 
+/// A placeholder UTXO provider that returns an error.
+/// This should be replaced with a real implementation that queries a Bitcoin node
+/// or uses pre-funded UTXOs from configuration.
+struct PlaceholderUtxoProvider;
+
+#[async_trait]
+impl UtxoProvider for PlaceholderUtxoProvider {
+    async fn get_utxo(&self, _min_value: u64) -> Result<BtcUtxo, ChainCommunicationError> {
+        Err(ChainCommunicationError::CustomError(
+            "UTXO provider not configured. Please provide UTXOs via configuration or implement a custom UtxoProvider.".to_string()
+        ))
+    }
+}
+
 fn build_metadata_provider(
     conn: &ConnectionConf,
-) -> Option<Arc<dyn crate::rpc_clients::tx_rewrite_middleware::MidlMetadataProvider>> {
+    signer: Option<&Signers>,
+) -> Option<Arc<dyn MidlMetadataProvider>> {
+    // First, check if we have a BtcSigner - if so, use the dynamic provider
+    if let Some(Signers::Btc(btc_signer)) = signer {
+        // Get fee rate from config or use a default
+        let fee_rate = conn
+            .execution
+            .as_ref()
+            .and_then(|conf| conf.btc_fee_rate_sat_per_vbyte)
+            .unwrap_or(10); // Default to 10 sat/vbyte
+
+        // Create a UTXO provider from config
+        let utxo_provider: Arc<dyn UtxoProvider> = if let Some(mempool_url) = conn
+            .execution
+            .as_ref()
+            .and_then(|conf| conf.mempool_url.as_ref())
+        {
+            let min_confirmations = conn
+                .execution
+                .as_ref()
+                .and_then(|conf| conf.min_confirmations)
+                .unwrap_or(1);
+
+            Arc::new(MempoolUtxoProvider::new(
+                mempool_url.clone(),
+                btc_signer.bitcoin_address().to_string(),
+                min_confirmations,
+            ))
+        } else {
+            // No mempool URL configured - use placeholder that returns an error
+            Arc::new(PlaceholderUtxoProvider)
+        };
+
+        return Some(Arc::new(BtcSignerMidlMetadataProvider::new(
+            btc_signer.clone(),
+            utxo_provider,
+            fee_rate,
+        )));
+    }
+
+    // Fall back to static metadata if provided
     let metadata = conn
         .execution
         .as_ref()

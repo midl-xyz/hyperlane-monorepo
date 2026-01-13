@@ -56,6 +56,23 @@ pub enum SignerConf {
         /// Whether the Starknet signer is legacy
         is_legacy: bool,
     },
+    /// Bitcoin key for MIDL chains
+    ///
+    /// This uses a Bitcoin private key to sign MIDL (type 0x07) transactions.
+    /// The EVM address is derived from the Bitcoin public key.
+    ///
+    /// Environment variable: `HYP_CHAINS_<CHAIN>_SIGNER_KEY`
+    /// Signer type: `HYP_CHAINS_<CHAIN>_SIGNER_TYPE=btcKey`
+    /// Address type: `HYP_CHAINS_<CHAIN>_SIGNER_ADDRESSTYPE` (p2wpkh, p2sh_p2wpkh, p2tr)
+    /// Network: `HYP_CHAINS_<CHAIN>_SIGNER_NETWORK` (mainnet, testnet, regtest, signet)
+    BtcKey {
+        /// Private key value (32 bytes)
+        key: H256,
+        /// Bitcoin address type (p2wpkh, p2sh_p2wpkh, p2tr)
+        address_type: String,
+        /// Bitcoin network (mainnet, testnet, regtest, signet)
+        network: String,
+    },
     /// Assume node will sign on RPC calls
     #[default]
     Node,
@@ -114,6 +131,11 @@ impl BuildableWithSignerConf for hyperlane_ethereum::Signers {
             SignerConf::RadixKey { .. } => {
                 bail!("radixKey signer is not supported by Ethereum")
             }
+            SignerConf::BtcKey { .. } => {
+                bail!(
+                    "btcKey signer is not supported by standard Ethereum chains, use MIDL protocol"
+                )
+            }
         })
     }
 }
@@ -146,6 +168,41 @@ impl BuildableWithSignerConf for hyperlane_midl::Signers {
                 );
                 let signer = AwsSigner::new(client, id, 0, Some(AWS_SIGNER_TIMEOUT)).await?;
                 hyperlane_midl::Signers::Aws(signer)
+            }
+            SignerConf::BtcKey {
+                key,
+                address_type,
+                network,
+            } => {
+                let btc_address_type = match address_type.to_lowercase().as_str() {
+                    "p2wpkh" => hyperlane_midl::BtcAddressType::P2WPKH,
+                    "p2sh_p2wpkh" | "p2sh-p2wpkh" => hyperlane_midl::BtcAddressType::P2SH_P2WPKH,
+                    "p2tr" => hyperlane_midl::BtcAddressType::P2TR,
+                    _ => {
+                        bail!(
+                            "Invalid BTC address type: {}. Expected: p2wpkh, p2sh_p2wpkh, or p2tr",
+                            address_type
+                        )
+                    }
+                };
+                let btc_network = match network.to_lowercase().as_str() {
+                    "mainnet" | "" => hyperlane_midl::BitcoinNetwork::Mainnet,
+                    "testnet" => hyperlane_midl::BitcoinNetwork::Testnet,
+                    "regtest" => hyperlane_midl::BitcoinNetwork::Regtest,
+                    "signet" => hyperlane_midl::BitcoinNetwork::Signet,
+                    _ => {
+                        bail!("Invalid BTC network: {}. Expected: mainnet, testnet, regtest, or signet", network)
+                    }
+                };
+                let private_key: [u8; 32] = key
+                    .as_bytes()
+                    .try_into()
+                    .context("Invalid BTC private key length")?;
+                // Chain ID will be set later by with_chain_id
+                let signer =
+                    hyperlane_midl::BtcSigner::new(&private_key, btc_address_type, btc_network, 1)
+                        .context("Failed to create BTC signer")?;
+                hyperlane_midl::Signers::Btc(signer)
             }
             SignerConf::CosmosKey { .. } => {
                 bail!("cosmosKey signer is not supported by Midl")

@@ -9,9 +9,7 @@ use tokio::sync::Mutex;
 
 use hyperlane_base::{
     db::HyperlaneRocksDB,
-    settings::{
-        ChainConf, RawChainConf,
-    },
+    settings::{ChainConf, RawChainConf},
     CoreMetrics,
 };
 use hyperlane_core::{ChainResult, ContractLocator, H256, H512, U256};
@@ -68,9 +66,8 @@ impl MidlAdapter {
             .get_signer()
             .ok_or_else(|| eyre!("No signer found in provider for domain {}", domain))?;
 
-        let provider: Arc<dyn hyperlane_ethereum::EvmProviderForLander> = Arc::new(
-            MidlEvmProviderAdapter::new(midl_provider),
-        );
+        let provider: Arc<dyn hyperlane_ethereum::EvmProviderForLander> =
+            Arc::new(MidlEvmProviderAdapter::new(midl_provider));
 
         let metrics = EthereumAdapterMetrics::new(
             conf.domain.clone(),
@@ -83,13 +80,20 @@ impl MidlAdapter {
         let payload_db = db.clone() as Arc<dyn PayloadDb>;
 
         let reorg_period = EthereumReorgPeriod::try_from(&conf.reorg_period)?;
-        let nonce_manager =
-            crate::adapter::chains::ethereum::NonceManager::new(&conf, db, provider.clone(), metrics.clone()).await?;
+        let nonce_manager = crate::adapter::chains::ethereum::NonceManager::new(
+            &conf,
+            db,
+            provider.clone(),
+            metrics.clone(),
+        )
+        .await?;
 
         let inner = EthereumAdapter {
             estimated_block_time: conf.estimated_block_time,
             domain: conf.domain.clone(),
-            transaction_overrides: convert_transaction_overrides(&connection_conf.transaction_overrides),
+            transaction_overrides: convert_transaction_overrides(
+                &connection_conf.transaction_overrides,
+            ),
             submission_config: connection_conf.op_submission_config.clone(),
             provider,
             reorg_period,
@@ -177,7 +181,9 @@ impl AdaptsChain for MidlAdapter {
     }
 }
 
-fn convert_transaction_overrides(midl: &hyperlane_midl::TransactionOverrides) -> EthTransactionOverrides {
+fn convert_transaction_overrides(
+    midl: &hyperlane_midl::TransactionOverrides,
+) -> EthTransactionOverrides {
     EthTransactionOverrides {
         gas_price: midl.gas_price,
         gas_limit: midl.gas_limit,
@@ -327,9 +333,11 @@ fn to_midl_reorg_period(
     value: &hyperlane_ethereum::EthereumReorgPeriod,
 ) -> hyperlane_midl::EthereumReorgPeriod {
     match value {
-        hyperlane_ethereum::EthereumReorgPeriod::Blocks(b) => hyperlane_midl::EthereumReorgPeriod::Blocks(*b),
-        hyperlane_ethereum::EthereumReorgPeriod::Tag(tag) => hyperlane_midl::EthereumReorgPeriod::Tag(*tag),
+        hyperlane_ethereum::EthereumReorgPeriod::Blocks(b) => {
+            hyperlane_midl::EthereumReorgPeriod::Blocks(*b)
+        }
+        hyperlane_ethereum::EthereumReorgPeriod::Tag(tag) => {
+            hyperlane_midl::EthereumReorgPeriod::Tag(*tag)
+        }
     }
 }
-
-

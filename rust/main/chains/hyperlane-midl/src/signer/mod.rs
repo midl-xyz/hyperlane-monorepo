@@ -8,16 +8,21 @@ use hyperlane_core::{
     HyperlaneSigner, HyperlaneSignerError, Signature as HyperlaneSignature, H160, H256,
 };
 
+mod btc_signer;
 mod singleton;
+
+pub use btc_signer::{BitcoinNetwork, BtcAddressType, BtcSigner, BtcSignerError};
 pub use singleton::*;
 
-/// Ethereum-supported signer types
+/// MIDL-supported signer types
 #[derive(Debug, Clone)]
 pub enum Signers {
-    /// A wallet instantiated with a locally stored private key
+    /// A wallet instantiated with a locally stored private key (Ethereum-style)
     Local(LocalWallet),
     /// A signer using a key stored in aws kms
     Aws(AwsSigner),
+    /// A Bitcoin-compatible signer for MIDL transactions
+    Btc(BtcSigner),
 }
 
 impl From<LocalWallet> for Signers {
@@ -32,6 +37,12 @@ impl From<AwsSigner> for Signers {
     }
 }
 
+impl From<BtcSigner> for Signers {
+    fn from(s: BtcSigner) -> Self {
+        Signers::Btc(s)
+    }
+}
+
 #[async_trait]
 impl Signer for Signers {
     type Error = SignersError;
@@ -43,6 +54,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => Ok(signer.sign_message(message).await?),
             Signers::Aws(signer) => Ok(signer.sign_message(message).await?),
+            Signers::Btc(signer) => Ok(signer.sign_message(message).await?),
         }
     }
 
@@ -50,6 +62,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => Ok(signer.sign_transaction(message).await?),
             Signers::Aws(signer) => Ok(signer.sign_transaction(message).await?),
+            Signers::Btc(signer) => Ok(signer.sign_transaction(message).await?),
         }
     }
 
@@ -60,6 +73,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => Ok(signer.sign_typed_data(payload).await?),
             Signers::Aws(signer) => Ok(signer.sign_typed_data(payload).await?),
+            Signers::Btc(signer) => Ok(signer.sign_typed_data(payload).await?),
         }
     }
 
@@ -67,6 +81,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => signer.address(),
             Signers::Aws(signer) => signer.address(),
+            Signers::Btc(signer) => signer.address(),
         }
     }
 
@@ -74,6 +89,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => signer.chain_id(),
             Signers::Aws(signer) => signer.chain_id(),
+            Signers::Btc(signer) => signer.chain_id(),
         }
     }
 
@@ -81,6 +97,7 @@ impl Signer for Signers {
         match self {
             Signers::Local(signer) => signer.with_chain_id(chain_id).into(),
             Signers::Aws(signer) => signer.with_chain_id(chain_id).into(),
+            Signers::Btc(signer) => signer.with_chain_id(chain_id).into(),
         }
     }
 }
@@ -109,6 +126,9 @@ pub enum SignersError {
     /// Wallet Signer Error
     #[error("{0}")]
     WalletError(#[from] WalletError),
+    /// Bitcoin Signer Error
+    #[error("{0}")]
+    BtcSignerError(#[from] BtcSignerError),
 }
 
 #[cfg(test)]

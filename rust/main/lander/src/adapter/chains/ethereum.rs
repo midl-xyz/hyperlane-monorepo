@@ -1,7 +1,7 @@
 pub use adapter::EthereumAdapter;
 pub use metrics::EthereumAdapterMetrics;
-pub use precursor::EthereumTxPrecursor;
 pub(crate) use nonce::NonceManager;
+pub use precursor::EthereumTxPrecursor;
 
 mod adapter;
 mod gas_price;

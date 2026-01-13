@@ -447,6 +447,28 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
                 suffix: suffix.to_owned(),
             })
         }};
+        (btcKey) => {{
+            let key = signer
+                .chain(&mut err)
+                .get_key("key")
+                .parse_private_key()
+                .unwrap_or_default();
+            let address_type = signer
+                .chain(&mut err)
+                .get_opt_key("addressType")
+                .parse_string()
+                .unwrap_or("p2wpkh");
+            let network = signer
+                .chain(&mut err)
+                .get_opt_key("network")
+                .parse_string()
+                .unwrap_or("mainnet");
+            err.into_result(SignerConf::BtcKey {
+                key,
+                address_type: address_type.to_owned(),
+                network: network.to_owned(),
+            })
+        }};
     }
 
     match signer_type {
@@ -455,6 +477,7 @@ fn parse_signer(signer: ValueParser) -> ConfigResult<SignerConf> {
         Some("cosmosKey") => parse_signer!(cosmosKey),
         Some("starkKey") => parse_signer!(starkKey),
         Some("radixKey") => parse_signer!(radixKey),
+        Some("btcKey") => parse_signer!(btcKey),
         Some(t) => {
             Err(eyre!("Unknown signer type `{t}`")).into_config_result(|| (&signer.cwp).add("type"))
         }

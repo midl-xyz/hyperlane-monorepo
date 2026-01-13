@@ -8,8 +8,11 @@ mod error;
 mod fallback;
 mod provider;
 mod retrying;
-mod tx_rewrite_middleware;
 mod trait_builder;
+mod tx_rewrite_middleware;
+mod utxo_provider;
+
+pub use utxo_provider::{fetch_fee_rate, FeeRateResponse, MempoolUtxoProvider};
 
 enum CategorizedResponse<R> {
     IsOk(R),
