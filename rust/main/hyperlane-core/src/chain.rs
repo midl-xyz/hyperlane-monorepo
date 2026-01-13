@@ -195,7 +195,7 @@ pub enum KnownHyperlaneDomain {
     Merlin = 4200,
     Metal = 1000001750,
     Metis = 1088,
-    Midl = 777, // todo: update as soon as chainID is known
+    Midl = 15001,
     MiracleChain = 92278,
     Milkyway = 1835625579,
     Mint = 185,
