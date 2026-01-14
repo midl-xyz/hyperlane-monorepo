@@ -1,0 +1,38 @@
+{
+  "network": "arbitrumsepolia",
+  "chainId": 421614,
+  "deployer": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+  "timestamp": "2026-01-12T09:51:19.050Z",
+  "config": {
+    "owner": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+    "defaultIsm": {
+      "type": "trustedRelayerIsm",
+      "relayer": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0"
+    },
+    "defaultHook": {
+      "type": "merkleTreeHook"
+    },
+    "requiredHook": {
+      "type": "protocolFee",
+      "maxProtocolFee": "1000000000000000",
+      "protocolFee": "0",
+      "beneficiary": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+      "owner": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0"
+    }
+  },
+  "addresses": {
+    "staticMerkleRootMultisigIsmFactory": "0x42E84D38Fa27B6220a1Bed56Ab210dE9cbD62cd2",
+    "staticMessageIdMultisigIsmFactory": "0x215906e2D18009D0bdF1Da393213B9A77AAAAF25",
+    "staticAggregationIsmFactory": "0x5097d3519f7e717d32E937D1c341Cd8dcd2287CD",
+    "staticAggregationHookFactory": "0x1DE294FB90e715915a124FC2661d409619933472",
+    "domainRoutingIsmFactory": "0x0Eb9102A1A88B440e929B835AC0b832B74475288",
+    "staticMerkleRootWeightedMultisigIsmFactory": "0x4Beb8F685950E8517Ece69B8B4c74ad237039A98",
+    "staticMessageIdWeightedMultisigIsmFactory": "0x4a7BCE9627c0B59aD705Bb8Af9818DE8ed303abf",
+    "proxyAdmin": "0xfC06ADAe39Ac0934e2a044B443E650335debb18B",
+    "mailbox": "0xe2A12DD0493d067c3473F7dAE3Cb6b946f7CC90E",
+    "interchainAccountRouter": "0x0D5c1450392E86b7DAB66B06982eC827E91D1E64",
+    "validatorAnnounce": "0xfb4bc77B99ee019f5cd7487C7F5AE91dAb889415",
+    "testRecipient": "0xE5602399BC6C8Ae06ABEE6C7D34e6349Cc2189B4",
+    "merkleTreeHook": "0x7B56f58c71E956c75eEE17b6A7456af3b125c16f"
+  }
+}

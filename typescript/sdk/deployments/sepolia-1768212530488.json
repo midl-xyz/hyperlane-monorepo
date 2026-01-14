@@ -1,0 +1,37 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployer": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+  "timestamp": "2026-01-12T10:08:50.488Z",
+  "addresses": {
+    "staticMerkleRootMultisigIsmFactory": "0xE5602399BC6C8Ae06ABEE6C7D34e6349Cc2189B4",
+    "staticMessageIdMultisigIsmFactory": "0xE172ccbE4088b2D8ff99f5501037eE65f13321ff",
+    "staticAggregationIsmFactory": "0xb17Da3ecfF1A0C46851c85674bb4853ee0f83A95",
+    "staticAggregationHookFactory": "0x06878606ba7696Fd532405FB17c3C0EbAa9BEaaD",
+    "domainRoutingIsmFactory": "0x1D860b5ce8302cDf9b23999FCb798C7FD24a04bf",
+    "staticMerkleRootWeightedMultisigIsmFactory": "0x8D9e26Ac3a56b0b739baf546dE1e096E08d0f196",
+    "staticMessageIdWeightedMultisigIsmFactory": "0x850ab4ad377A3810FB8296e4cB9b0D066eCC4cc5",
+    "proxyAdmin": "0x2802157a02D7B8923eee2fFE5888F8f2D3242E49",
+    "mailbox": "0xC3A5887DDFE5FaeEB06954de4Aa3054265209D33",
+    "interchainAccountRouter": "0xC7b0f0AB73234BB0ae595aaeb102d679AdB72c8f",
+    "validatorAnnounce": "0xC4E525AEF45115FF9E54e3eF3C8a55013f28DfaB",
+    "testRecipient": "0xf3e723C640ef6319E59116d97ABD31C7C2e6Ade8",
+    "merkleTreeHook": "0xf69Af1cA3c0Bd35cFFA49A31c7DCfC22a9913ba1"
+  },
+  "config": {
+    "owner": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+    "defaultIsm": {
+      "type": "testIsm"
+    },
+    "defaultHook": {
+      "type": "merkleTreeHook"
+    },
+    "requiredHook": {
+      "type": "protocolFee",
+      "maxProtocolFee": "1000000000000000000",
+      "protocolFee": "1000000000000000",
+      "beneficiary": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0",
+      "owner": "0x7A45B1f995eDCEF7A1B3f808A3bed779F699aDc0"
+    }
+  }
+}
