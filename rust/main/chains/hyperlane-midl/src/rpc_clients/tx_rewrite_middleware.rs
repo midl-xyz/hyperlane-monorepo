@@ -3,17 +3,22 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use bech32::Hrp;
 use ethers::prelude::FromErr;
 use ethers::providers::{Middleware, PendingTransaction};
 use ethers::types::transaction::eip2718::TypedTransaction;
+use ethers::types::transaction::midl::MidlTransactionRequest;
 use ethers::types::{Bytes, U256};
 use ethers_core::utils::rlp;
 use ethers_signers::Signer;
 use hyperlane_core::{ChainCommunicationError, H256};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-type TxKey = (ethers::types::Address, U256);
+/// Key for caching MIDL metadata: (to_address, nonce)
+/// We use `to` instead of `from` because `from` requires signature recovery,
+/// which fails for MIDL transactions that use BIP322/BIP143 signatures.
+type TxKey = (Option<ethers::types::Address>, U256);
 
 /// Metadata required to convert an EVM write into a Midl submission.
 #[derive(Clone, Debug)]
@@ -75,6 +80,12 @@ pub trait UtxoProvider: Send + Sync {
     async fn get_utxo(&self, min_value: u64) -> Result<BtcUtxo, ChainCommunicationError>;
 }
 
+/// GlobalParams contract address for fetching TSS address
+const GLOBAL_PARAMS_CONTRACT: &str = "0x0000000000000000000000000000000000001006";
+
+/// Function selector for getTSSAddress() - 0x15b0162f
+const GET_TSS_ADDRESS_SELECTOR: [u8; 4] = [0x15, 0xb0, 0x16, 0x2f];
+
 /// Provider that uses a BtcSigner to create MIDL metadata dynamically.
 ///
 /// This provider builds Bitcoin transactions to fund MIDL EVM transactions.
@@ -86,6 +97,11 @@ pub struct BtcSignerMidlMetadataProvider {
     default_fee_rate: u64,
     /// Optional mempool URL for dynamic fee estimation
     mempool_url: Option<String>,
+    rpc_url: String,
+    /// Cached TSS x-only public key (32 bytes)
+    tss_pubkey: tokio::sync::OnceCell<[u8; 32]>,
+    /// Bitcoin network (for TSS address encoding)
+    bitcoin_network: crate::signer::BitcoinNetwork,
 }
 
 impl BtcSignerMidlMetadataProvider {
@@ -95,16 +111,22 @@ impl BtcSignerMidlMetadataProvider {
     /// * `signer` - The BtcSigner to use for signing
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate in satoshis per virtual byte
+    /// * `rpc_url` - RPC URL for fetching TSS address
     pub fn new(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
+        rpc_url: String,
     ) -> Self {
+        let bitcoin_network = signer.network();
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: None,
+            rpc_url,
+            tss_pubkey: tokio::sync::OnceCell::new(),
+            bitcoin_network,
         }
     }
 
@@ -115,18 +137,117 @@ impl BtcSignerMidlMetadataProvider {
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate (fallback if API fails)
     /// * `mempool_url` - URL for mempool API to fetch fee rates
+    /// * `rpc_url` - RPC URL for fetching TSS address
     pub fn with_mempool_url(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
         mempool_url: String,
+        rpc_url: String,
     ) -> Self {
+        let bitcoin_network = signer.network();
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: Some(mempool_url),
+            rpc_url,
+            tss_pubkey: tokio::sync::OnceCell::new(),
+            bitcoin_network,
         }
+    }
+
+    /// Fetch the TSS x-only public key from GlobalParams contract.
+    /// The result is cached after the first successful fetch.
+    async fn get_tss_pubkey(&self) -> Result<[u8; 32], ChainCommunicationError> {
+        self.tss_pubkey
+            .get_or_try_init(|| async { self.fetch_tss_pubkey_from_contract().await })
+            .await
+            .copied()
+    }
+
+    /// Fetch TSS address from GlobalParams contract via eth_call.
+    async fn fetch_tss_pubkey_from_contract(&self) -> Result<[u8; 32], ChainCommunicationError> {
+        use serde_json::{json, Value};
+
+        let client = reqwest::Client::new();
+
+        // Build the eth_call request
+        let call_data = format!("0x{}", hex::encode(GET_TSS_ADDRESS_SELECTOR));
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{
+                "to": GLOBAL_PARAMS_CONTRACT,
+                "data": call_data
+            }, "latest"],
+            "id": 1
+        });
+
+        let response = client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                ChainCommunicationError::CustomError(format!(
+                    "Failed to fetch TSS address from GlobalParams: {}",
+                    e
+                ))
+            })?;
+
+        let response_json: Value = response.json().await.map_err(|e| {
+            ChainCommunicationError::CustomError(format!(
+                "Failed to parse TSS address response: {}",
+                e
+            ))
+        })?;
+
+        // Extract the result (bytes32 = x-only public key)
+        let result_hex = response_json["result"].as_str().ok_or_else(|| {
+            ChainCommunicationError::CustomError(format!(
+                "Invalid TSS address response: {:?}",
+                response_json
+            ))
+        })?;
+
+        // Remove 0x prefix and decode
+        let result_hex = result_hex.strip_prefix("0x").unwrap_or(result_hex);
+        let result_bytes = hex::decode(result_hex).map_err(|e| {
+            ChainCommunicationError::CustomError(format!("Failed to decode TSS address hex: {}", e))
+        })?;
+
+        // bytes32 = 32 bytes
+        if result_bytes.len() != 32 {
+            return Err(ChainCommunicationError::CustomError(format!(
+                "Invalid TSS address length: expected 32 bytes, got {}",
+                result_bytes.len()
+            )));
+        }
+
+        let mut tss_pubkey = [0u8; 32];
+        tss_pubkey.copy_from_slice(&result_bytes);
+
+        info!(
+            tss_pubkey = %hex::encode(&tss_pubkey),
+            "Fetched TSS x-only public key from GlobalParams contract"
+        );
+
+        Ok(tss_pubkey)
+    }
+
+    /// Build a P2TR scriptPubKey from an x-only public key for the TSS address.
+    fn build_tss_p2tr_script(x_only_pubkey: &[u8; 32]) -> Vec<u8> {
+        let mut script = Vec::with_capacity(34);
+        script.push(0x51); // OP_1 (witness version 1)
+        script.push(0x20); // Push 32 bytes
+        script.extend_from_slice(x_only_pubkey);
+        script
+    }
+
+    /// Get the HRP (human-readable part) for bech32m encoding based on network.
+    fn get_network_hrp(&self) -> &'static str {
+        self.bitcoin_network.hrp()
     }
 
     /// Fetch the current fee rate from mempool API or use default.
@@ -154,28 +275,39 @@ impl BtcSignerMidlMetadataProvider {
     }
 
     /// Serialize outputs for sighash computation.
-    /// Returns the serialized outputs (change output + OP_RETURN output).
+    /// Returns the serialized outputs:
+    /// - Output 0: TSS output (P2TR to TSS address with funding amount)
+    /// - Output 1: OP_RETURN with EVM tx hash (commitment data)
+    /// - Output 2: Change output (if there's change)
     fn serialize_outputs(
+        tss_pubkey: &[u8; 32],
+        tss_value: u64,
         change_value: u64,
         change_script: &[u8],
         evm_tx_hash: &[u8; 32],
     ) -> Vec<u8> {
         let mut outputs = Vec::new();
 
-        // Output 1: Change output (if there's change)
-        if change_value > 0 {
-            outputs.extend_from_slice(&change_value.to_le_bytes());
-            push_varint(&mut outputs, change_script.len() as u64);
-            outputs.extend_from_slice(change_script);
-        }
+        // Output 0: TSS output (P2TR)
+        let tss_script = Self::build_tss_p2tr_script(tss_pubkey);
+        outputs.extend_from_slice(&tss_value.to_le_bytes());
+        push_varint(&mut outputs, tss_script.len() as u64);
+        outputs.extend_from_slice(&tss_script);
 
-        // Output 2: OP_RETURN with EVM tx hash
+        // Output 1: OP_RETURN with EVM tx hash (commitment data)
         outputs.extend_from_slice(&0u64.to_le_bytes()); // Value: 0 satoshis
         let op_return_script_len = 2usize.saturating_add(evm_tx_hash.len());
         push_varint(&mut outputs, op_return_script_len as u64);
         outputs.push(0x6a); // OP_RETURN
         outputs.push(evm_tx_hash.len() as u8);
         outputs.extend_from_slice(evm_tx_hash);
+
+        // Output 2: Change output (if there's change)
+        if change_value > 0 {
+            outputs.extend_from_slice(&change_value.to_le_bytes());
+            push_varint(&mut outputs, change_script.len() as u64);
+            outputs.extend_from_slice(change_script);
+        }
 
         outputs
     }
@@ -186,6 +318,8 @@ impl BtcSignerMidlMetadataProvider {
     fn compute_bip143_sighash(
         utxo: &BtcUtxo,
         pubkey_hash: &[u8; 20],
+        tss_pubkey: &[u8; 32],
+        tss_value: u64,
         change_value: u64,
         change_script: &[u8],
         evm_tx_hash: &[u8; 32],
@@ -207,7 +341,8 @@ impl BtcSignerMidlMetadataProvider {
         preimage.extend_from_slice(&hash_prevouts);
 
         // 3. hashSequence - double SHA256 of all sequences
-        let sequence = 0xfffffffdu32.to_le_bytes();
+        // MIDL requires nSequence = 0xffffffff (final, no RBF)
+        let sequence = 0xffffffffu32.to_le_bytes();
         let hash_sequence = Self::double_sha256(&sequence);
         preimage.extend_from_slice(&hash_sequence);
 
@@ -233,7 +368,13 @@ impl BtcSignerMidlMetadataProvider {
         preimage.extend_from_slice(&sequence);
 
         // 8. hashOutputs - double SHA256 of all outputs
-        let outputs = Self::serialize_outputs(change_value, change_script, evm_tx_hash);
+        let outputs = Self::serialize_outputs(
+            tss_pubkey,
+            tss_value,
+            change_value,
+            change_script,
+            evm_tx_hash,
+        );
         let hash_outputs = Self::double_sha256(&outputs);
         preimage.extend_from_slice(&hash_outputs);
 
@@ -253,6 +394,8 @@ impl BtcSignerMidlMetadataProvider {
     fn compute_bip341_sighash(
         utxo: &BtcUtxo,
         x_only_pubkey: &[u8; 32],
+        tss_pubkey: &[u8; 32],
+        tss_value: u64,
         change_value: u64,
         change_script: &[u8],
         evm_tx_hash: &[u8; 32],
@@ -312,11 +455,18 @@ impl BtcSignerMidlMetadataProvider {
         sig_msg.extend_from_slice(&sha_scriptpubkeys);
 
         // sha_sequences - SHA256 of all sequences
-        let sha_sequences = Sha256::digest(&0xfffffffdu32.to_le_bytes());
+        // MIDL requires nSequence = 0xffffffff (final, no RBF)
+        let sha_sequences = Sha256::digest(&0xffffffffu32.to_le_bytes());
         sig_msg.extend_from_slice(&sha_sequences);
 
         // sha_outputs - SHA256 of all outputs
-        let outputs = Self::serialize_outputs(change_value, change_script, evm_tx_hash);
+        let outputs = Self::serialize_outputs(
+            tss_pubkey,
+            tss_value,
+            change_value,
+            change_script,
+            evm_tx_hash,
+        );
         let sha_outputs = Sha256::digest(&outputs);
         sig_msg.extend_from_slice(&sha_outputs);
 
@@ -395,17 +545,20 @@ impl BtcSignerMidlMetadataProvider {
         der
     }
 
-    /// Build a Bitcoin transaction for MIDL with optional change output.
+    /// Build a Bitcoin transaction for MIDL with TSS output, OP_RETURN, and optional change.
     ///
     /// Creates a transaction that spends a UTXO and creates:
-    /// - An optional change output (if change_value > 0)
-    /// - An OP_RETURN output containing the EVM transaction data reference
+    /// - Output 0: TSS output (P2TR to TSS taproot address with funding amount)
+    /// - Output 1: OP_RETURN output containing the EVM transaction hash (commitment data)
+    /// - Output 2: Change output (if change_value > 0)
     ///
     /// # Arguments
     /// * `utxo` - The UTXO to spend
     /// * `evm_tx_hash` - The EVM transaction hash to embed in OP_RETURN
     /// * `signature` - The signature (DER for P2WPKH, Schnorr for P2TR)
     /// * `pubkey` - The public key (33 bytes compressed for P2WPKH, 32 bytes x-only for P2TR)
+    /// * `tss_pubkey` - The TSS x-only public key (32 bytes)
+    /// * `tss_value` - The value to send to the TSS address
     /// * `change_value` - Amount to return as change (0 for no change output)
     /// * `change_script` - The scriptPubKey for the change output
     /// * `is_taproot` - Whether this is a Taproot (P2TR) transaction
@@ -415,6 +568,8 @@ impl BtcSignerMidlMetadataProvider {
         evm_tx_hash: &[u8; 32],
         signature: &[u8],
         pubkey: &[u8],
+        tss_pubkey: &[u8; 32],
+        tss_value: u64,
         change_value: u64,
         change_script: &[u8],
         is_taproot: bool,
@@ -443,27 +598,33 @@ impl BtcSignerMidlMetadataProvider {
         // Script sig (empty for SegWit)
         tx.push(0x00);
 
-        // Sequence (0xfffffffd for RBF)
-        tx.extend_from_slice(&0xfffffffdu32.to_le_bytes());
+        // Sequence (0xffffffff = final, required by MIDL - no RBF, no relative locktime)
+        tx.extend_from_slice(&0xffffffffu32.to_le_bytes());
 
-        // Output count (1 or 2 outputs)
-        let output_count = if change_value > 0 { 2u8 } else { 1u8 };
+        // Output count: TSS + OP_RETURN + optional change
+        let output_count = if change_value > 0 { 3u8 } else { 2u8 };
         tx.push(output_count);
 
-        // Output 1: Change output (if there's change)
-        if change_value > 0 {
-            tx.extend_from_slice(&change_value.to_le_bytes());
-            push_varint(&mut tx, change_script.len() as u64);
-            tx.extend_from_slice(change_script);
-        }
+        // Output 0: TSS output (P2TR)
+        let tss_script = Self::build_tss_p2tr_script(tss_pubkey);
+        tx.extend_from_slice(&tss_value.to_le_bytes());
+        push_varint(&mut tx, tss_script.len() as u64);
+        tx.extend_from_slice(&tss_script);
 
-        // Output 2 (or 1 if no change): OP_RETURN with EVM transaction hash
+        // Output 1: OP_RETURN with EVM transaction hash (commitment data)
         tx.extend_from_slice(&0u64.to_le_bytes()); // Value: 0 satoshis
         let op_return_script_len = 2usize.saturating_add(evm_tx_hash.len());
         push_varint(&mut tx, op_return_script_len as u64);
         tx.push(0x6a); // OP_RETURN
         tx.push(evm_tx_hash.len() as u8); // Push length
         tx.extend_from_slice(evm_tx_hash);
+
+        // Output 2: Change output (if there's change)
+        if change_value > 0 {
+            tx.extend_from_slice(&change_value.to_le_bytes());
+            push_varint(&mut tx, change_script.len() as u64);
+            tx.extend_from_slice(change_script);
+        }
 
         // Witness data (for the single input)
         if is_taproot {
@@ -683,6 +844,9 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
     ) -> Result<MidlPreparedMetadata, ChainCommunicationError> {
         use crate::signer::BtcAddressType;
 
+        // Fetch the TSS x-only public key from GlobalParams contract
+        let tss_pubkey = self.get_tss_pubkey().await?;
+
         // Get dynamic fee rate from mempool API (or use default)
         let fee_rate = self.get_fee_rate().await;
 
@@ -690,26 +854,35 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         let address_type = self.signer.address_type();
         let is_taproot = matches!(address_type, BtcAddressType::P2TR);
 
-        // Estimate vsize based on address type and whether we'll have change
-        // P2WPKH: ~110 vbytes without change, ~141 vbytes with change
-        // P2TR: ~111 vbytes without change, ~154 vbytes with change (Schnorr sigs are 64 bytes)
-        let estimated_vsize_with_change = if is_taproot { 154u64 } else { 141u64 };
+        // Estimate vsize based on address type
+        // With TSS output (P2TR), we now have 3 outputs: TSS + OP_RETURN + change
+        // P2WPKH: ~110 vbytes base + 43 vbytes for TSS output (34 script + 8 value + 1 varint) = ~185 vbytes
+        // P2TR: ~111 vbytes base + 43 vbytes for TSS output = ~197 vbytes
+        let estimated_vsize_with_change = if is_taproot { 197u64 } else { 185u64 };
         let estimated_fee = estimated_vsize_with_change.saturating_mul(fee_rate);
 
         // Dust threshold (546 satoshis for standard outputs)
         const DUST_THRESHOLD: u64 = 546;
 
-        // Get a UTXO that can cover the fee plus potential dust
-        // We request more than just the fee to have room for change
-        let min_utxo_value = estimated_fee.saturating_add(DUST_THRESHOLD);
+        // TSS funding value - minimum dust threshold for the TSS output
+        // This value is sent to the TSS address
+        let tss_value = DUST_THRESHOLD;
+
+        // Total required: fee + TSS value + potential change dust
+        let min_utxo_value = estimated_fee
+            .saturating_add(tss_value)
+            .saturating_add(DUST_THRESHOLD);
         let utxo = self.utxo_provider.get_utxo(min_utxo_value).await?;
 
         // Calculate change (if above dust threshold)
-        let change_value = if utxo.value > estimated_fee.saturating_add(DUST_THRESHOLD) {
-            utxo.value.saturating_sub(estimated_fee)
-        } else {
-            0 // No change output - all goes to fee
-        };
+        // change = utxo_value - tss_value - fee
+        let total_output_without_change = tss_value.saturating_add(estimated_fee);
+        let change_value =
+            if utxo.value > total_output_without_change.saturating_add(DUST_THRESHOLD) {
+                utxo.value.saturating_sub(total_output_without_change)
+            } else {
+                0 // No change output - remaining goes to fee
+            };
 
         // Compute the EVM transaction hash for reference
         let evm_tx_hash = tx.sighash().0;
@@ -731,6 +904,8 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             let sighash = Self::compute_bip341_sighash(
                 &utxo,
                 pubkey_32,
+                &tss_pubkey,
+                tss_value,
                 change_value,
                 &change_script,
                 &evm_tx_hash,
@@ -753,6 +928,8 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             let sighash = Self::compute_bip143_sighash(
                 &utxo,
                 &pubkey_hash,
+                &tss_pubkey,
+                tss_value,
                 change_value,
                 &change_script,
                 &evm_tx_hash,
@@ -780,12 +957,14 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             pubkey_for_witness = full_pubkey; // 33-byte compressed pubkey for P2WPKH
         }
 
-        // Build the Bitcoin transaction
+        // Build the Bitcoin transaction with TSS output as first output
         let btc_tx = self.build_btc_transaction(
             &utxo,
             &evm_tx_hash,
             &signature_bytes,
             &pubkey_for_witness,
+            &tss_pubkey,
+            tss_value,
             change_value,
             &change_script,
             is_taproot,
@@ -800,10 +979,12 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             utxo_txid = ?hex::encode(&utxo.tx_hash),
             utxo_vout = utxo.vout,
             utxo_value = utxo.value,
+            tss_pubkey = ?hex::encode(&tss_pubkey),
+            tss_value = tss_value,
             fee_rate = fee_rate,
             change_value = change_value,
             is_taproot = is_taproot,
-            "Built signed Bitcoin transaction for MIDL"
+            "Built signed Bitcoin transaction for MIDL with TSS output"
         );
 
         Ok(MidlPreparedMetadata {
@@ -945,10 +1126,23 @@ where
         };
 
         let Some(key) = extract_key(tx) else {
+            warn!("Could not extract key from transaction (missing from or nonce)");
             return Ok(());
         };
 
+        debug!(
+            from = ?key.0,
+            nonce = ?key.1,
+            "Preparing MIDL metadata for transaction"
+        );
+
         let metadata = metadata_provider.prepare_metadata(tx).await?;
+
+        // Convert the transaction to MIDL type 7 with BTC metadata
+        // This must happen before signing so the signer signs a type 7 transaction
+        let midl_tx = convert_to_midl_transaction(tx, &metadata);
+        *tx = midl_tx;
+
         self.insert_metadata(key, metadata);
         Ok(())
     }
@@ -1010,18 +1204,107 @@ where
     }
 }
 
-fn extract_key(tx: &TypedTransaction) -> Option<TxKey> {
-    let from = tx.from().copied()?;
-    let nonce = tx.nonce().cloned()?;
-    Some((from, nonce))
+/// Convert a TypedTransaction to a MIDL type 7 transaction with BTC metadata.
+/// MIDL fixed gas price: 1,000,000 wei (1 gwei)
+const MIDL_GAS_PRICE: u64 = 1_000_000;
+
+fn convert_to_midl_transaction(
+    tx: &TypedTransaction,
+    metadata: &MidlPreparedMetadata,
+) -> TypedTransaction {
+    // Create base transaction request from the existing transaction
+    // MIDL uses a fixed static gas price of 1,000,000 wei (1 gwei)
+    let base_tx = ethers::types::TransactionRequest {
+        from: tx.from().copied(),
+        to: tx.to().cloned(),
+        gas: tx.gas().copied(),
+        gas_price: Some(U256::from(MIDL_GAS_PRICE)),
+        value: tx.value().copied(),
+        data: tx.data().cloned(),
+        nonce: tx.nonce().copied(),
+        chain_id: tx.chain_id().map(|id| id.as_u64().into()),
+    };
+
+    // Create MIDL transaction with BTC metadata
+    let midl_tx = MidlTransactionRequest {
+        tx: base_tx,
+        btc_tx_hash: Some(metadata.btc_tx_hash.into()),
+        public_key: Some(metadata.public_key.clone()),
+        btc_address_byte: Some(metadata.btc_address_byte),
+        access_list: tx.access_list().cloned().unwrap_or_default(),
+    };
+
+    TypedTransaction::Midl(midl_tx)
 }
 
-/// Decode a signed transaction to extract the (from, nonce) key.
+fn extract_key(tx: &TypedTransaction) -> Option<TxKey> {
+    use ethers::types::NameOrAddress;
+
+    // Convert NameOrAddress to Address (we only support Address targets for caching)
+    let to = tx.to().and_then(|t| match t {
+        NameOrAddress::Address(addr) => Some(*addr),
+        NameOrAddress::Name(_) => None, // ENS names not supported for cache key
+    });
+    let nonce = tx.nonce().cloned()?;
+    Some((to, nonce))
+}
+
+/// Decode a signed transaction to extract the (to, nonce) key.
 /// Returns None if decoding fails.
+///
+/// This function manually decodes the RLP without requiring signature recovery,
+/// which is necessary for MIDL transactions that use BIP322/BIP143 signatures
+/// (standard signature recovery would fail for these transactions).
 fn decode_tx_key(tx_bytes: &Bytes) -> Option<TxKey> {
-    let rlp = rlp::Rlp::new(tx_bytes.as_ref());
-    let (decoded_tx, _signature) = TypedTransaction::decode_signed(&rlp).ok()?;
-    extract_key(&decoded_tx)
+    let bytes = tx_bytes.as_ref();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // Check transaction type
+    let (tx_type, rlp_data) = if bytes[0] <= 0x7f {
+        // EIP-2718 typed transaction: first byte is the type
+        (Some(bytes[0]), &bytes[1..])
+    } else {
+        // Legacy transaction (starts with RLP list)
+        (None, bytes)
+    };
+
+    let rlp = rlp::Rlp::new(rlp_data);
+    if !rlp.is_list() {
+        return None;
+    }
+
+    // Extract `to` and `nonce` based on transaction type
+    // The field positions vary by type:
+    // - Legacy (None): [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+    // - EIP-2930 (0x01): [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
+    // - EIP-1559 (0x02): [chainId, nonce, maxPriorityFee, maxFee, gasLimit, to, value, data, accessList, v, r, s]
+    // - MIDL (0x07): [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, btcTxHash, publicKey, btcAddressByte, v, r, s]
+    let (nonce_idx, to_idx) = match tx_type {
+        None => (0, 3),       // Legacy
+        Some(0x01) => (1, 4), // EIP-2930
+        Some(0x02) => (1, 5), // EIP-1559
+        Some(0x07) => (1, 4), // MIDL
+        _ => return None,     // Unknown type
+    };
+
+    // Extract nonce
+    let nonce: U256 = rlp.val_at(nonce_idx).ok()?;
+
+    // Extract `to` (can be empty for contract creation)
+    let to_bytes: Vec<u8> = rlp.val_at(to_idx).ok()?;
+    let to = if to_bytes.is_empty() {
+        None
+    } else if to_bytes.len() == 20 {
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&to_bytes);
+        Some(ethers::types::Address::from(addr))
+    } else {
+        return None; // Invalid `to` field
+    };
+
+    Some((to, nonce))
 }
 
 #[cfg(test)]
@@ -1032,30 +1315,34 @@ mod tests {
     #[test]
     fn test_extract_key_from_transaction() {
         let mut tx = TypedTransaction::default();
-        tx.set_from(Address::from_low_u64_be(1));
+        tx.set_to(Address::from_low_u64_be(1));
         tx.set_nonce(U256::from(42));
 
         let key = extract_key(&tx);
         assert!(key.is_some());
-        let (from, nonce) = key.unwrap();
-        assert_eq!(from, Address::from_low_u64_be(1));
+        let (to, nonce) = key.unwrap();
+        assert_eq!(to, Some(Address::from_low_u64_be(1)));
         assert_eq!(nonce, U256::from(42));
     }
 
     #[test]
-    fn test_extract_key_missing_from() {
+    fn test_extract_key_no_to_address() {
+        // Transaction without `to` (contract creation) should still work
         let mut tx = TypedTransaction::default();
         tx.set_nonce(U256::from(42));
-        // from is not set
+        // to is not set (contract creation)
 
         let key = extract_key(&tx);
-        assert!(key.is_none());
+        assert!(key.is_some());
+        let (to, nonce) = key.unwrap();
+        assert_eq!(to, None);
+        assert_eq!(nonce, U256::from(42));
     }
 
     #[test]
     fn test_extract_key_missing_nonce() {
         let mut tx = TypedTransaction::default();
-        tx.set_from(Address::from_low_u64_be(1));
+        tx.set_to(Address::from_low_u64_be(1));
         // nonce is not set
 
         let key = extract_key(&tx);
@@ -1068,7 +1355,7 @@ mod tests {
         let cache: Arc<Mutex<HashMap<TxKey, MidlPreparedMetadata>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let key = (Address::from_low_u64_be(1), U256::from(42));
+        let key = (Some(Address::from_low_u64_be(1)), U256::from(42));
         let metadata = MidlPreparedMetadata {
             btc_tx_hash: H256::from_low_u64_be(123),
             btc_transaction: Bytes::from(vec![1, 2, 3]),
