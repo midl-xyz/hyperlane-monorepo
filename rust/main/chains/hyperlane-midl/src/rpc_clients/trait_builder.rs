@@ -291,6 +291,8 @@ pub trait BuildableWithProvider {
     where
         M: Middleware + 'static,
     {
+        let is_midl_chain = matches!(signer.as_ref(), Some(Signers::Btc(_)));
+
         let metadata_provider = build_metadata_provider(conn, signer.as_ref());
         let provider = TxRewriteMiddleware::new(provider, metadata_provider);
 
@@ -309,6 +311,18 @@ pub trait BuildableWithProvider {
             // don't wrap the signing provider in any middlewares
             return Ok(self
                 .build_with_provider(signing_provider, conn, locator)
+                .await);
+        }
+
+        // For MIDL chains (BTC signer), skip gas escalator and gas oracle middlewares
+        // since MIDL uses a fixed gas price (1 gwei). Only use nonce manager.
+        if is_midl_chain {
+            let nonce_manager_provider = wrap_with_nonce_manager(signing_provider, signer_address)
+                .await
+                .map_err(ChainCommunicationError::from_other)?;
+
+            return Ok(self
+                .build_with_provider(nonce_manager_provider, conn, locator)
                 .await);
         }
 
@@ -445,6 +459,12 @@ fn build_metadata_provider(
             .and_then(|conf| conf.btc_fee_rate_sat_per_vbyte)
             .unwrap_or(10); // Default to 10 sat/vbyte
 
+        let rpc_urls = conn.rpc_urls();
+        let rpc_url = rpc_urls
+            .first()
+            .map(|url| url.to_string())
+            .unwrap_or_default();
+
         // Create a UTXO provider from config
         let utxo_provider: Arc<dyn UtxoProvider> = if let Some(mempool_url) = conn
             .execution
@@ -471,6 +491,7 @@ fn build_metadata_provider(
             btc_signer.clone(),
             utxo_provider,
             fee_rate,
+            rpc_url,
         )));
     }
 
