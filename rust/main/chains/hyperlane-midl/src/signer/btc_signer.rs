@@ -3,6 +3,9 @@
 //! This module provides a signer that uses a Bitcoin private key to sign
 //! MIDL (type 0x07) EVM transactions. The signer derives the EVM address
 //! from the Bitcoin public key and signs transaction hashes using ECDSA.
+//!
+//! For MIDL transactions, the signature uses BIP322 message signing with
+//! BIP143 witness signature hash computation, not a simple keccak256.
 
 use async_trait::async_trait;
 use bech32::Hrp;
@@ -20,6 +23,7 @@ use k256::SecretKey;
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracing::debug;
 
 /// Bitcoin network for address generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +319,234 @@ impl BtcSigner {
         let hash = keccak256(&data);
         self.sign_hash(&hash)
     }
+
+    /// Sign a MIDL transaction using BIP322/BIP143 signature scheme.
+    ///
+    /// The MIDL node validates signatures using BIP322 message signing with BIP143
+    /// witness signature hash, not a simple keccak256. This method implements the
+    /// exact signature scheme expected by the MIDL node.
+    ///
+    /// # Arguments
+    /// * `rlp_hash` - The keccak256 hash of 0x07 || RLP([chainId, nonce, gasPrice, gas, to, value, data, btcTxHash, publicKey, btcAddressByte, accessList])
+    ///
+    /// # Returns
+    /// An EVM-compatible signature with r, s, v values where v is the recovery ID (0 or 1) + 27.
+    pub fn sign_midl_transaction(&self, rlp_hash: &[u8; 32]) -> Result<Signature, BtcSignerError> {
+        // Step 1: Reconstruct the compressed public key (33 bytes)
+        let mut compressed_pubkey = vec![self.btc_address_byte];
+        compressed_pubkey.extend_from_slice(&self.public_key_32);
+
+        // Step 2: Compute P2WPKH scriptPubKey
+        // pubkeyHash = RIPEMD160(SHA256(compressedPubKey))
+        let pubkey_hash = hash160(&compressed_pubkey);
+        // scriptPubKey = OP_0 || PUSH(20) || pubkeyHash = 0x0014 || pubkeyHash
+        let script_pubkey = Self::build_p2wpkh_script_pubkey(&pubkey_hash);
+
+        // Step 3: Create BIP322 message hash
+        // message = rlpHash.toHexString() (with "0x" prefix)
+        let message = format!("0x{}", hex::encode(rlp_hash));
+        let message_hash = Self::bip322_message_hash(message.as_bytes());
+
+        // Step 4: Create "toSpend" virtual transaction and compute its txid
+        let to_spend_txid = Self::create_to_spend_txid(&message_hash, &script_pubkey);
+
+        // Step 5: Compute BIP143 witness signature hash for "toSign" transaction
+        let sighash =
+            Self::compute_bip143_sighash_for_bip322(&to_spend_txid, &script_pubkey, &pubkey_hash);
+
+        debug!(
+            rlp_hash = %hex::encode(rlp_hash),
+            message = %message,
+            message_hash = %hex::encode(&message_hash),
+            to_spend_txid = %hex::encode(&to_spend_txid),
+            sighash = %hex::encode(&sighash),
+            "Computed BIP322/BIP143 sighash for MIDL transaction"
+        );
+
+        // Step 6: Sign with ECDSA
+        let (signature, recovery_id): (K256Signature, RecoveryId) = self
+            .signing_key
+            .sign_prehash_recoverable(&sighash)
+            .map_err(|e| BtcSignerError::SigningError(e.to_string()))?;
+
+        let r = ethers::types::U256::from_big_endian(signature.r().to_bytes().as_slice());
+        let s = ethers::types::U256::from_big_endian(signature.s().to_bytes().as_slice());
+
+        // Use EIP-155 style v value: recovery_id + chain_id * 2 + 35
+        // The normalize_v function in ethers will convert this back to 0/1 for RLP encoding
+        // which is what the MIDL node expects (raw recovery ID)
+        let v = recovery_id.to_byte() as u64 + self.chain_id * 2 + 35;
+
+        Ok(Signature { r, s, v })
+    }
+
+    /// Build P2WPKH scriptPubKey: OP_0 PUSH(20) <pubkey_hash>
+    fn build_p2wpkh_script_pubkey(pubkey_hash: &[u8; 20]) -> Vec<u8> {
+        let mut script = Vec::with_capacity(22);
+        script.push(0x00); // OP_0 (witness version 0)
+        script.push(0x14); // Push 20 bytes
+        script.extend_from_slice(pubkey_hash);
+        script
+    }
+
+    /// Compute BIP322 tagged hash for message signing.
+    ///
+    /// messageHash = SHA256(SHA256("BIP0322-signed-message") || SHA256("BIP0322-signed-message") || message)
+    fn bip322_message_hash(message: &[u8]) -> [u8; 32] {
+        let tag = b"BIP0322-signed-message";
+        let tag_hash = Sha256::digest(tag);
+
+        let mut hasher = Sha256::new();
+        hasher.update(&tag_hash);
+        hasher.update(&tag_hash);
+        hasher.update(message);
+
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Create "toSpend" virtual transaction and return its txid.
+    ///
+    /// toSpend structure:
+    /// - version: 0
+    /// - inputs: [{ prevOut: 0x00...00:0xFFFFFFFF, scriptSig: OP_0 || messageHash, sequence: 0 }]
+    /// - outputs: [{ value: 0, scriptPubKey: scriptPubKey }]
+    /// - locktime: 0
+    fn create_to_spend_txid(message_hash: &[u8; 32], script_pubkey: &[u8]) -> [u8; 32] {
+        let mut tx = Vec::new();
+
+        // Version (0)
+        tx.extend_from_slice(&0u32.to_le_bytes());
+
+        // Input count (1)
+        tx.push(0x01);
+
+        // Input prevOut: 32 zero bytes (txid)
+        tx.extend_from_slice(&[0u8; 32]);
+        // Input prevOut: 0xFFFFFFFF (vout)
+        tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+
+        // scriptSig: OP_0 || PUSH(32) || messageHash
+        let script_sig_len = 1 + 1 + 32; // OP_0 + push opcode + 32 bytes
+        tx.push(script_sig_len as u8);
+        tx.push(0x00); // OP_0
+        tx.push(0x20); // Push 32 bytes
+        tx.extend_from_slice(message_hash);
+
+        // Sequence (0)
+        tx.extend_from_slice(&0u32.to_le_bytes());
+
+        // Output count (1)
+        tx.push(0x01);
+
+        // Output value (0)
+        tx.extend_from_slice(&0u64.to_le_bytes());
+
+        // Output scriptPubKey
+        tx.push(script_pubkey.len() as u8);
+        tx.extend_from_slice(script_pubkey);
+
+        // Locktime (0)
+        tx.extend_from_slice(&0u32.to_le_bytes());
+
+        // Compute double SHA256 for txid
+        Self::double_sha256(&tx)
+    }
+
+    /// Compute BIP143 witness signature hash for BIP322 "toSign" transaction.
+    ///
+    /// toSign structure:
+    /// - version: 0
+    /// - inputs: [{ prevOut: toSpend.txid():0, scriptSig: empty, sequence: 0 }]
+    /// - outputs: [{ value: 0, scriptPubKey: OP_RETURN }]
+    /// - locktime: 0
+    ///
+    /// BIP143 sighash computation for P2WPKH witness program.
+    fn compute_bip143_sighash_for_bip322(
+        to_spend_txid: &[u8; 32],
+        _script_pubkey: &[u8],
+        pubkey_hash: &[u8; 20],
+    ) -> [u8; 32] {
+        // BIP143 sighash preimage components:
+        // 1. nVersion
+        // 2. hashPrevouts
+        // 3. hashSequence
+        // 4. outpoint (txid + vout)
+        // 5. scriptCode
+        // 6. value
+        // 7. nSequence
+        // 8. hashOutputs
+        // 9. nLockTime
+        // 10. sighash type
+
+        let mut preimage = Vec::new();
+
+        // 1. nVersion (0 for BIP322)
+        preimage.extend_from_slice(&0u32.to_le_bytes());
+
+        // 2. hashPrevouts - double SHA256 of outpoint
+        let mut prevouts = Vec::new();
+        // txid is already in internal byte order (needs to be reversed for display but not for hashing)
+        prevouts.extend_from_slice(to_spend_txid);
+        prevouts.extend_from_slice(&0u32.to_le_bytes()); // vout = 0
+        let hash_prevouts = Self::double_sha256(&prevouts);
+        preimage.extend_from_slice(&hash_prevouts);
+
+        // 3. hashSequence - double SHA256 of sequence
+        let sequence = 0u32.to_le_bytes();
+        let hash_sequence = Self::double_sha256(&sequence);
+        preimage.extend_from_slice(&hash_sequence);
+
+        // 4. outpoint being signed
+        preimage.extend_from_slice(to_spend_txid);
+        preimage.extend_from_slice(&0u32.to_le_bytes()); // vout = 0
+
+        // 5. scriptCode for P2WPKH: OP_DUP OP_HASH160 <20-byte-pubkey-hash> OP_EQUALVERIFY OP_CHECKSIG
+        let mut script_code = Vec::new();
+        script_code.push(0x19); // Length of script (25 bytes)
+        script_code.push(0x76); // OP_DUP
+        script_code.push(0xa9); // OP_HASH160
+        script_code.push(0x14); // Push 20 bytes
+        script_code.extend_from_slice(pubkey_hash);
+        script_code.push(0x88); // OP_EQUALVERIFY
+        script_code.push(0xac); // OP_CHECKSIG
+        preimage.extend_from_slice(&script_code);
+
+        // 6. value (0 for BIP322)
+        preimage.extend_from_slice(&0u64.to_le_bytes());
+
+        // 7. nSequence (0 for BIP322)
+        preimage.extend_from_slice(&sequence);
+
+        // 8. hashOutputs - double SHA256 of outputs
+        // toSign has one output: value=0, scriptPubKey=OP_RETURN (0x6a)
+        let mut outputs = Vec::new();
+        outputs.extend_from_slice(&0u64.to_le_bytes()); // value = 0
+        outputs.push(0x01); // scriptPubKey length = 1
+        outputs.push(0x6a); // OP_RETURN
+        let hash_outputs = Self::double_sha256(&outputs);
+        preimage.extend_from_slice(&hash_outputs);
+
+        // 9. nLockTime (0)
+        preimage.extend_from_slice(&0u32.to_le_bytes());
+
+        // 10. sighash type (SIGHASH_ALL = 0x01)
+        preimage.extend_from_slice(&1u32.to_le_bytes());
+
+        // Final sighash is double SHA256 of preimage
+        Self::double_sha256(&preimage)
+    }
+
+    /// Compute double SHA256 hash.
+    fn double_sha256(data: &[u8]) -> [u8; 32] {
+        let hash1 = Sha256::digest(data);
+        let hash2 = Sha256::digest(hash1);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash2);
+        result
+    }
 }
 
 #[async_trait]
@@ -330,7 +562,17 @@ impl Signer for BtcSigner {
     }
 
     async fn sign_transaction(&self, tx: &TypedTransaction) -> Result<Signature, Self::Error> {
-        // Get the sighash (keccak256 of RLP-encoded transaction)
+        // For MIDL transactions, use BIP322/BIP143 signature scheme
+        if let TypedTransaction::Midl(_) = tx {
+            // The sighash() for MIDL transactions returns keccak256(0x07 || RLP([...]))
+            // which is exactly the baseBTCHash we need for BIP322 signing
+            let rlp_hash = tx.sighash();
+            return self
+                .sign_midl_transaction(rlp_hash.as_fixed_bytes())
+                .map_err(|e| WalletError::Eip712Error(e.to_string()));
+        }
+
+        // For other transaction types, use standard keccak256 signing
         let sighash = tx.sighash();
         self.sign_hash(sighash.as_fixed_bytes())
             .map_err(|e| WalletError::Eip712Error(e.to_string()))
