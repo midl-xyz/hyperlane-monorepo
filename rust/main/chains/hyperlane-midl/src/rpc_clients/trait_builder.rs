@@ -477,11 +477,25 @@ fn build_metadata_provider(
                 .and_then(|conf| conf.min_confirmations)
                 .unwrap_or(1);
 
-            Arc::new(MempoolUtxoProvider::new(
-                mempool_url.clone(),
-                btc_signer.bitcoin_address().to_string(),
-                min_confirmations,
-            ))
+            let use_electrs = conn
+                .execution
+                .as_ref()
+                .and_then(|conf| conf.use_electrs_api)
+                .unwrap_or(false);
+
+            if use_electrs {
+                Arc::new(MempoolUtxoProvider::new_electrs(
+                    mempool_url.clone(),
+                    btc_signer.bitcoin_address().to_string(),
+                    min_confirmations,
+                ))
+            } else {
+                Arc::new(MempoolUtxoProvider::new(
+                    mempool_url.clone(),
+                    btc_signer.bitcoin_address().to_string(),
+                    min_confirmations,
+                ))
+            }
         } else {
             // No mempool URL configured - use placeholder that returns an error
             Arc::new(PlaceholderUtxoProvider)

@@ -134,9 +134,14 @@ pub struct MidlExecutionConf {
     /// Defaults to 10 sat/vbyte if not specified.
     pub btc_fee_rate_sat_per_vbyte: Option<u64>,
     /// Mempool API URL for fetching UTXOs and fee rates.
-    /// Should be a mempool.space-compatible API (e.g., "https://mempool.space").
+    /// Should be a mempool.space-compatible API (e.g., "https://mempool.space")
+    /// or an electrs HTTP API (e.g., "http://localhost:3002").
     /// If not specified, dynamic UTXO fetching is disabled.
     pub mempool_url: Option<String>,
+    /// Use electrs API format (no `/api` prefix) instead of mempool.space format.
+    /// Set to true when using electrs directly, false for mempool.space.
+    /// Defaults to false if not specified.
+    pub use_electrs_api: Option<bool>,
     /// Minimum confirmations required for UTXOs to be considered spendable.
     /// Defaults to 1 if not specified.
     pub min_confirmations: Option<u64>,
