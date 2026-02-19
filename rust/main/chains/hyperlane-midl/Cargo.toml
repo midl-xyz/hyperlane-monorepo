@@ -36,8 +36,8 @@ url.workspace = true
 # Bitcoin signing dependencies
 k256.workspace = true
 sha2.workspace = true
-ripemd.workspace = true
 bech32.workspace = true
+bitcoin.workspace = true
 
 ethers-prometheus = { path = "../../ethers-prometheus", features = ["serde"] }
 hyperlane-core = { path = "../../hyperlane-core", features = ["async"] }

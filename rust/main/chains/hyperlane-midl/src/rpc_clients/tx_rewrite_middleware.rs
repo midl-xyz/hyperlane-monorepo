@@ -4,7 +4,15 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bech32::Hrp;
+use bitcoin::absolute::LockTime;
+use bitcoin::blockdata::opcodes::all as opcodes;
+use bitcoin::blockdata::script::{Builder as ScriptBuilder, ScriptBuf};
+use bitcoin::blockdata::transaction::{OutPoint, Sequence, Transaction, TxIn, TxOut, Version};
+use bitcoin::blockdata::witness::Witness;
+use bitcoin::consensus::encode as btc_encode;
+use bitcoin::hashes::Hash;
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::{Amount, EcdsaSighashType, TapSighashType, Txid, WPubkeyHash};
 use ethers::prelude::FromErr;
 use ethers::providers::{Middleware, PendingTransaction};
 use ethers::types::transaction::eip2718::TypedTransaction;
@@ -93,6 +101,85 @@ static GLOBAL_PARAMS_CONTRACT: std::sync::LazyLock<Address> = std::sync::LazyLoc
 
 /// Function selector for getTSSAddress() - 0x15b0162f
 const GET_TSS_ADDRESS_SELECTOR: [u8; 4] = [0x15, 0xb0, 0x16, 0x2f];
+
+/// Convert a BtcUtxo to a bitcoin::OutPoint.
+/// BtcUtxo.tx_hash is in display order (big-endian hex from API).
+/// bitcoin::Txid uses internal byte order (little-endian).
+fn btcutxo_to_outpoint(utxo: &BtcUtxo) -> OutPoint {
+    let mut internal_bytes = utxo.tx_hash;
+    internal_bytes.reverse(); // display order → internal order
+    OutPoint::new(Txid::from_byte_array(internal_bytes), utxo.vout)
+}
+
+/// Build a P2TR scriptPubKey from a raw (untweaked) x-only public key.
+///
+/// We do NOT use `ScriptBuf::new_p2tr()` because both TSS and signer P2TR
+/// scripts use raw untweaked x-only pubkeys. `new_p2tr` applies BIP341 key tweaking.
+fn build_p2tr_script_untweaked(x_only_pubkey: &[u8; 32]) -> ScriptBuf {
+    ScriptBuilder::new()
+        .push_opcode(opcodes::OP_PUSHNUM_1)
+        .push_slice(x_only_pubkey)
+        .into_script()
+}
+
+/// Build an unsigned bitcoin::Transaction from UTXOs and outputs.
+///
+/// Creates a transaction with empty witnesses containing:
+/// - One input per UTXO
+/// - Output 0: TSS output (P2TR to TSS taproot address)
+/// - Output 1: OP_RETURN with EVM tx hash
+/// - Output 2: Change output (if change_value > 0)
+fn build_unsigned_tx(
+    utxos: &[BtcUtxo],
+    tss_pubkey: &[u8; 32],
+    tss_value: u64,
+    change_value: u64,
+    change_script: &ScriptBuf,
+    evm_tx_hash: &[u8; 32],
+) -> Transaction {
+    let inputs: Vec<TxIn> = utxos
+        .iter()
+        .map(|utxo| TxIn {
+            previous_output: btcutxo_to_outpoint(utxo),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX, // 0xffffffff — final, no RBF
+            witness: Witness::default(),
+        })
+        .collect();
+
+    let mut outputs = Vec::with_capacity(3);
+
+    // Output 0: TSS output (P2TR)
+    outputs.push(TxOut {
+        value: Amount::from_sat(tss_value),
+        script_pubkey: build_p2tr_script_untweaked(tss_pubkey),
+    });
+
+    // Output 1: OP_RETURN with EVM transaction hash
+    let op_return_script = ScriptBuilder::new()
+        .push_opcode(opcodes::OP_RETURN)
+        .push_slice(evm_tx_hash)
+        .into_script();
+    outputs.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: op_return_script,
+    });
+
+    // Output 2: Change output (if there's change)
+    if change_value > 0 {
+        outputs.push(TxOut {
+            value: Amount::from_sat(change_value),
+            script_pubkey: change_script.clone(),
+        });
+    }
+
+    Transaction {
+        version: Version(2),
+        lock_time: LockTime::ZERO,
+        input: inputs,
+        output: outputs,
+    }
+}
 
 /// Provider that uses a BtcSigner to create MIDL metadata dynamically.
 ///
@@ -202,15 +289,6 @@ impl BtcSignerMidlMetadataProvider {
         Ok(tss_pubkey)
     }
 
-    /// Build a P2TR scriptPubKey from an x-only public key for the TSS address.
-    fn build_tss_p2tr_script(x_only_pubkey: &[u8; 32]) -> Vec<u8> {
-        let mut script = Vec::with_capacity(34);
-        script.push(0x51); // OP_1 (witness version 1)
-        script.push(0x20); // Push 32 bytes
-        script.extend_from_slice(x_only_pubkey);
-        script
-    }
-
     /// Fetch the current fee rate from mempool API or use default.
     async fn get_fee_rate(&self) -> u64 {
         if let Some(url) = &self.mempool_url {
@@ -235,526 +313,6 @@ impl BtcSignerMidlMetadataProvider {
         }
     }
 
-    /// Serialize outputs for sighash computation.
-    /// Returns the serialized outputs:
-    /// - Output 0: TSS output (P2TR to TSS address with funding amount)
-    /// - Output 1: OP_RETURN with EVM tx hash (commitment data)
-    /// - Output 2: Change output (if there's change)
-    fn serialize_outputs(
-        tss_pubkey: &[u8; 32],
-        tss_value: u64,
-        change_value: u64,
-        change_script: &[u8],
-        evm_tx_hash: &[u8; 32],
-    ) -> Vec<u8> {
-        let mut outputs = Vec::new();
-
-        // Output 0: TSS output (P2TR)
-        let tss_script = Self::build_tss_p2tr_script(tss_pubkey);
-        outputs.extend_from_slice(&tss_value.to_le_bytes());
-        push_varint(&mut outputs, tss_script.len() as u64);
-        outputs.extend_from_slice(&tss_script);
-
-        // Output 1: OP_RETURN with EVM tx hash (commitment data)
-        outputs.extend_from_slice(&0u64.to_le_bytes()); // Value: 0 satoshis
-        let op_return_script_len = 2usize.saturating_add(evm_tx_hash.len());
-        push_varint(&mut outputs, op_return_script_len as u64);
-        outputs.push(0x6a); // OP_RETURN
-        outputs.push(evm_tx_hash.len() as u8);
-        outputs.extend_from_slice(evm_tx_hash);
-
-        // Output 2: Change output (if there's change)
-        if change_value > 0 {
-            outputs.extend_from_slice(&change_value.to_le_bytes());
-            push_varint(&mut outputs, change_script.len() as u64);
-            outputs.extend_from_slice(change_script);
-        }
-
-        outputs
-    }
-
-    /// Compute the BIP143 sighash for a P2WPKH input.
-    ///
-    /// BIP143 defines the sighash algorithm for SegWit (witness version 0) transactions.
-    /// When spending multiple inputs, `hashPrevouts` and `hashSequence` cover ALL inputs,
-    /// while the per-input fields (outpoint, scriptCode, value, nSequence) use the
-    /// input at `input_index`.
-    fn compute_bip143_sighash(
-        utxos: &[BtcUtxo],
-        input_index: usize,
-        pubkey_hash: &[u8; 20],
-        tss_pubkey: &[u8; 32],
-        tss_value: u64,
-        change_value: u64,
-        change_script: &[u8],
-        evm_tx_hash: &[u8; 32],
-    ) -> [u8; 32] {
-        use sha2::Digest;
-
-        let mut preimage = Vec::new();
-
-        // 1. nVersion (2 for SegWit)
-        preimage.extend_from_slice(&2u32.to_le_bytes());
-
-        // 2. hashPrevouts - double SHA256 of ALL outpoints
-        let mut prevouts = Vec::new();
-        for utxo in utxos {
-            let mut txid_reversed = utxo.tx_hash;
-            txid_reversed.reverse();
-            prevouts.extend_from_slice(&txid_reversed);
-            prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
-        }
-        let hash_prevouts = Self::double_sha256(&prevouts);
-        preimage.extend_from_slice(&hash_prevouts);
-
-        // 3. hashSequence - double SHA256 of ALL sequences
-        // MIDL requires nSequence = 0xffffffff (final, no RBF)
-        let sequence = 0xffffffffu32.to_le_bytes();
-        let mut sequences = Vec::new();
-        for _ in utxos {
-            sequences.extend_from_slice(&sequence);
-        }
-        let hash_sequence = Self::double_sha256(&sequences);
-        preimage.extend_from_slice(&hash_sequence);
-
-        // 4. outpoint being signed (this input)
-        let current_utxo = &utxos[input_index];
-        let mut txid_reversed = current_utxo.tx_hash;
-        txid_reversed.reverse();
-        preimage.extend_from_slice(&txid_reversed);
-        preimage.extend_from_slice(&current_utxo.vout.to_le_bytes());
-
-        // 5. scriptCode for P2WPKH
-        let mut script_code = Vec::new();
-        script_code.push(0x19); // Length of script (25 bytes)
-        script_code.push(0x76); // OP_DUP
-        script_code.push(0xa9); // OP_HASH160
-        script_code.push(0x14); // Push 20 bytes
-        script_code.extend_from_slice(pubkey_hash);
-        script_code.push(0x88); // OP_EQUALVERIFY
-        script_code.push(0xac); // OP_CHECKSIG
-        preimage.extend_from_slice(&script_code);
-
-        // 6. value of the UTXO being spent (this input)
-        preimage.extend_from_slice(&current_utxo.value.to_le_bytes());
-
-        // 7. nSequence (this input)
-        preimage.extend_from_slice(&sequence);
-
-        // 8. hashOutputs - double SHA256 of all outputs
-        let outputs = Self::serialize_outputs(
-            tss_pubkey,
-            tss_value,
-            change_value,
-            change_script,
-            evm_tx_hash,
-        );
-        let hash_outputs = Self::double_sha256(&outputs);
-        preimage.extend_from_slice(&hash_outputs);
-
-        // 9. nLockTime
-        preimage.extend_from_slice(&0u32.to_le_bytes());
-
-        // 10. sighash type (SIGHASH_ALL = 0x01)
-        preimage.extend_from_slice(&1u32.to_le_bytes());
-
-        Self::double_sha256(&preimage)
-    }
-
-    /// Compute the BIP341 sighash for a P2TR (Taproot) key-path spend.
-    ///
-    /// BIP341 defines the sighash algorithm for Taproot transactions.
-    /// For key-path spending with SIGHASH_DEFAULT (0x00), we use a tagged hash.
-    /// When spending multiple inputs, `sha_prevouts`, `sha_amounts`,
-    /// `sha_scriptpubkeys`, and `sha_sequences` cover ALL inputs.
-    fn compute_bip341_sighash(
-        utxos: &[BtcUtxo],
-        input_index: usize,
-        x_only_pubkey: &[u8; 32],
-        tss_pubkey: &[u8; 32],
-        tss_value: u64,
-        change_value: u64,
-        change_script: &[u8],
-        evm_tx_hash: &[u8; 32],
-    ) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-
-        // BIP341 uses tagged hashes: SHA256(SHA256(tag) || SHA256(tag) || data)
-        fn tagged_hash(tag: &str, data: &[u8]) -> [u8; 32] {
-            let tag_hash = Sha256::digest(tag.as_bytes());
-            let mut hasher = Sha256::new();
-            hasher.update(&tag_hash);
-            hasher.update(&tag_hash);
-            hasher.update(data);
-            let result = hasher.finalize();
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&result);
-            out
-        }
-
-        // Build the sighash message for SIGHASH_DEFAULT (0x00)
-        let mut sig_msg = Vec::new();
-
-        // epoch (1 byte) - always 0 for now
-        sig_msg.push(0x00);
-
-        // hash_type (1 byte) - SIGHASH_DEFAULT = 0x00
-        sig_msg.push(0x00);
-
-        // nVersion (4 bytes)
-        sig_msg.extend_from_slice(&2u32.to_le_bytes());
-
-        // nLockTime (4 bytes)
-        sig_msg.extend_from_slice(&0u32.to_le_bytes());
-
-        // sha_prevouts - SHA256 of ALL outpoints
-        let mut prevouts = Vec::new();
-        for utxo in utxos {
-            let mut txid_reversed = utxo.tx_hash;
-            txid_reversed.reverse();
-            prevouts.extend_from_slice(&txid_reversed);
-            prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
-        }
-        let sha_prevouts = Sha256::digest(&prevouts);
-        sig_msg.extend_from_slice(&sha_prevouts);
-
-        // sha_amounts - SHA256 of ALL input amounts
-        let mut amounts = Vec::new();
-        for utxo in utxos {
-            amounts.extend_from_slice(&utxo.value.to_le_bytes());
-        }
-        let sha_amounts = Sha256::digest(&amounts);
-        sig_msg.extend_from_slice(&sha_amounts);
-
-        // sha_scriptpubkeys - SHA256 of ALL input scriptPubKeys
-        // For P2TR: length-prefixed OP_1 <32-byte x-only pubkey>
-        // All inputs use the same signer, so they share the same scriptPubKey
-        let mut scriptpubkeys = Vec::new();
-        for _ in utxos {
-            scriptpubkeys.push(0x22); // Length (34 bytes)
-            scriptpubkeys.push(0x51); // OP_1 (witness version 1)
-            scriptpubkeys.push(0x20); // Push 32 bytes
-            scriptpubkeys.extend_from_slice(x_only_pubkey);
-        }
-        let sha_scriptpubkeys = Sha256::digest(&scriptpubkeys);
-        sig_msg.extend_from_slice(&sha_scriptpubkeys);
-
-        // sha_sequences - SHA256 of ALL sequences
-        // MIDL requires nSequence = 0xffffffff (final, no RBF)
-        let mut sequences = Vec::new();
-        for _ in utxos {
-            sequences.extend_from_slice(&0xffffffffu32.to_le_bytes());
-        }
-        let sha_sequences = Sha256::digest(&sequences);
-        sig_msg.extend_from_slice(&sha_sequences);
-
-        // sha_outputs - SHA256 of all outputs
-        let outputs = Self::serialize_outputs(
-            tss_pubkey,
-            tss_value,
-            change_value,
-            change_script,
-            evm_tx_hash,
-        );
-        let sha_outputs = Sha256::digest(&outputs);
-        sig_msg.extend_from_slice(&sha_outputs);
-
-        // spend_type (1 byte) - 0x00 for key-path spend with no annex
-        sig_msg.push(0x00);
-
-        // input_index (4 bytes)
-        sig_msg.extend_from_slice(&(input_index as u32).to_le_bytes());
-
-        // Compute the tagged hash "TapSighash"
-        tagged_hash("TapSighash", &sig_msg)
-    }
-
-    /// Compute double SHA256 hash.
-    fn double_sha256(data: &[u8]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let hash1 = Sha256::digest(data);
-        let hash2 = Sha256::digest(hash1);
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&hash2);
-        result
-    }
-
-    /// Compute HASH160 (RIPEMD160(SHA256(data))) for public key hashing.
-    fn hash160(data: &[u8]) -> [u8; 20] {
-        use ripemd::Ripemd160;
-        use sha2::{Digest, Sha256};
-        let sha256_hash = Sha256::digest(data);
-        let ripemd_hash = Ripemd160::digest(sha256_hash);
-        let mut result = [0u8; 20];
-        result.copy_from_slice(&ripemd_hash);
-        result
-    }
-
-    /// Encode an ECDSA signature in DER format.
-    ///
-    /// DER format: 0x30 <total_len> 0x02 <r_len> <r> 0x02 <s_len> <s>
-    /// Where r and s may need a leading 0x00 byte if the high bit is set
-    /// (to indicate positive integer in ASN.1 DER).
-    fn encode_der_signature(r: &[u8; 32], s: &[u8; 32]) -> Vec<u8> {
-        // Helper to encode an integer in DER format
-        fn encode_integer(value: &[u8]) -> Vec<u8> {
-            // Skip leading zeros
-            let mut start = 0;
-            while start < value.len() && value[start] == 0 {
-                start = start.saturating_add(1);
-            }
-            let trimmed = if start < value.len() {
-                &value[start..]
-            } else {
-                &[0u8]
-            };
-
-            let mut result = Vec::new();
-            result.push(0x02); // INTEGER tag
-
-            // If high bit is set, prepend 0x00 to indicate positive
-            if !trimmed.is_empty() && (trimmed[0] & 0x80) != 0 {
-                result.push((trimmed.len().saturating_add(1)) as u8); // Length includes leading 0x00
-                result.push(0x00);
-            } else {
-                result.push(trimmed.len() as u8);
-            }
-            result.extend_from_slice(trimmed);
-            result
-        }
-
-        let r_der = encode_integer(r);
-        let s_der = encode_integer(s);
-
-        let mut der = Vec::new();
-        der.push(0x30); // SEQUENCE tag
-        der.push((r_der.len().saturating_add(s_der.len())) as u8); // Total length
-        der.extend_from_slice(&r_der);
-        der.extend_from_slice(&s_der);
-        der
-    }
-
-    /// Build a Bitcoin transaction for MIDL with TSS output, OP_RETURN, and optional change.
-    ///
-    /// Creates a transaction that spends one or more UTXOs and creates:
-    /// - Output 0: TSS output (P2TR to TSS taproot address with funding amount)
-    /// - Output 1: OP_RETURN output containing the EVM transaction hash (commitment data)
-    /// - Output 2: Change output (if change_value > 0)
-    ///
-    /// # Arguments
-    /// * `utxos` - The UTXOs to spend (one input per UTXO)
-    /// * `evm_tx_hash` - The EVM transaction hash to embed in OP_RETURN
-    /// * `signatures` - Per-input signatures (DER for P2WPKH, Schnorr for P2TR)
-    /// * `pubkeys` - Per-input public keys (33 bytes compressed for P2WPKH, 32 bytes x-only for P2TR)
-    /// * `tss_pubkey` - The TSS x-only public key (32 bytes)
-    /// * `tss_value` - The value to send to the TSS address
-    /// * `change_value` - Amount to return as change (0 for no change output)
-    /// * `change_script` - The scriptPubKey for the change output
-    /// * `is_taproot` - Whether this is a Taproot (P2TR) transaction
-    fn build_btc_transaction(
-        &self,
-        utxos: &[BtcUtxo],
-        evm_tx_hash: &[u8; 32],
-        signatures: &[Vec<u8>],
-        pubkeys: &[Vec<u8>],
-        tss_pubkey: &[u8; 32],
-        tss_value: u64,
-        change_value: u64,
-        change_script: &[u8],
-        is_taproot: bool,
-    ) -> Result<Vec<u8>, ChainCommunicationError> {
-        let mut tx = Vec::new();
-
-        // Version (2 for SegWit)
-        tx.extend_from_slice(&2u32.to_le_bytes());
-
-        // Marker and flag for SegWit (0x00, 0x01)
-        tx.push(0x00);
-        tx.push(0x01);
-
-        // Input count
-        push_varint(&mut tx, utxos.len() as u64);
-
-        // Serialize each input
-        for utxo in utxos {
-            // txid (reversed for Bitcoin)
-            let mut txid_reversed = utxo.tx_hash;
-            txid_reversed.reverse();
-            tx.extend_from_slice(&txid_reversed);
-
-            // vout
-            tx.extend_from_slice(&utxo.vout.to_le_bytes());
-
-            // Script sig (empty for SegWit)
-            tx.push(0x00);
-
-            // Sequence (0xffffffff = final, required by MIDL - no RBF, no relative locktime)
-            tx.extend_from_slice(&0xffffffffu32.to_le_bytes());
-        }
-
-        // Output count: TSS + OP_RETURN + optional change
-        let output_count = if change_value > 0 { 3u64 } else { 2u64 };
-        push_varint(&mut tx, output_count);
-
-        // Output 0: TSS output (P2TR)
-        let tss_script = Self::build_tss_p2tr_script(tss_pubkey);
-        tx.extend_from_slice(&tss_value.to_le_bytes());
-        push_varint(&mut tx, tss_script.len() as u64);
-        tx.extend_from_slice(&tss_script);
-
-        // Output 1: OP_RETURN with EVM transaction hash (commitment data)
-        tx.extend_from_slice(&0u64.to_le_bytes()); // Value: 0 satoshis
-        let op_return_script_len = 2usize.saturating_add(evm_tx_hash.len());
-        push_varint(&mut tx, op_return_script_len as u64);
-        tx.push(0x6a); // OP_RETURN
-        tx.push(evm_tx_hash.len() as u8); // Push length
-        tx.extend_from_slice(evm_tx_hash);
-
-        // Output 2: Change output (if there's change)
-        if change_value > 0 {
-            tx.extend_from_slice(&change_value.to_le_bytes());
-            push_varint(&mut tx, change_script.len() as u64);
-            tx.extend_from_slice(change_script);
-        }
-
-        // Witness data for each input
-        for i in 0..utxos.len() {
-            if is_taproot {
-                // P2TR key-path spend: single witness item (64-byte Schnorr signature)
-                // For SIGHASH_DEFAULT, no sighash byte is appended
-                tx.push(0x01); // Number of witness items
-                push_varint(&mut tx, signatures[i].len() as u64);
-                tx.extend_from_slice(&signatures[i]);
-            } else {
-                // P2WPKH: two witness items (signature + pubkey)
-                tx.push(0x02); // Number of witness items
-
-                // Witness item 1: signature (with SIGHASH_ALL)
-                let sig_with_hashtype = [&signatures[i][..], &[0x01]].concat();
-                push_varint(&mut tx, sig_with_hashtype.len() as u64);
-                tx.extend_from_slice(&sig_with_hashtype);
-
-                // Witness item 2: public key (33 bytes compressed)
-                push_varint(&mut tx, pubkeys[i].len() as u64);
-                tx.extend_from_slice(&pubkeys[i]);
-            }
-        }
-
-        // Locktime
-        tx.extend_from_slice(&0u32.to_le_bytes());
-
-        Ok(tx)
-    }
-
-    /// Compute the Bitcoin transaction hash (txid) by excluding witness data.
-    ///
-    /// For SegWit transactions, the txid is computed from the non-witness serialization:
-    /// - nVersion (4 bytes)
-    /// - inputs (without witness)
-    /// - outputs
-    /// - nLockTime (4 bytes)
-    ///
-    /// The marker (0x00) and flag (0x01) bytes and witness data are excluded.
-    fn compute_btc_tx_hash(tx_bytes: &[u8]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-
-        // Check if this is a SegWit transaction (has marker 0x00 and flag 0x01 after version)
-        if tx_bytes.len() > 6 && tx_bytes[4] == 0x00 && tx_bytes[5] == 0x01 {
-            // This is a SegWit transaction - we need to strip witness data
-            let mut non_witness = Vec::new();
-
-            // Copy nVersion (4 bytes)
-            non_witness.extend_from_slice(&tx_bytes[0..4]);
-
-            // Skip marker and flag, start from byte 6
-            let mut pos = 6;
-
-            // Read input count (varint)
-            let (input_count, varint_len) = read_varint(&tx_bytes[pos..]);
-            non_witness.extend_from_slice(&tx_bytes[pos..pos + varint_len]);
-            pos += varint_len;
-
-            // Copy all inputs (without witness data)
-            for _ in 0..input_count {
-                // txid (32 bytes)
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + 32]);
-                pos += 32;
-                // vout (4 bytes)
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + 4]);
-                pos += 4;
-                // scriptSig length (varint)
-                let (script_len, varint_len) = read_varint(&tx_bytes[pos..]);
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + varint_len]);
-                pos += varint_len;
-                // scriptSig
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + script_len as usize]);
-                pos += script_len as usize;
-                // sequence (4 bytes)
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + 4]);
-                pos += 4;
-            }
-
-            // Read output count (varint)
-            let (output_count, varint_len) = read_varint(&tx_bytes[pos..]);
-            non_witness.extend_from_slice(&tx_bytes[pos..pos + varint_len]);
-            pos += varint_len;
-
-            // Copy all outputs
-            for _ in 0..output_count {
-                // value (8 bytes)
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + 8]);
-                pos += 8;
-                // scriptPubKey length (varint)
-                let (script_len, varint_len) = read_varint(&tx_bytes[pos..]);
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + varint_len]);
-                pos += varint_len;
-                // scriptPubKey
-                non_witness.extend_from_slice(&tx_bytes[pos..pos + script_len as usize]);
-                pos += script_len as usize;
-            }
-
-            // Skip witness data - find locktime at the end
-            // The last 4 bytes are always locktime
-            non_witness.extend_from_slice(&tx_bytes[tx_bytes.len() - 4..]);
-
-            // Double SHA256 of non-witness serialization
-            let hash1 = Sha256::digest(&non_witness);
-            let hash2 = Sha256::digest(&hash1);
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&hash2);
-            result.reverse(); // Bitcoin uses little-endian display
-            result
-        } else {
-            // Legacy transaction - hash entire transaction
-            let hash1 = Sha256::digest(tx_bytes);
-            let hash2 = Sha256::digest(&hash1);
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&hash2);
-            result.reverse();
-            result
-        }
-    }
-
-    /// Build a P2WPKH scriptPubKey from a public key hash.
-    /// Format: OP_0 <20-byte-pubkey-hash>
-    fn build_p2wpkh_script(pubkey_hash: &[u8; 20]) -> Vec<u8> {
-        let mut script = Vec::with_capacity(22);
-        script.push(0x00); // OP_0 (witness version 0)
-        script.push(0x14); // Push 20 bytes
-        script.extend_from_slice(pubkey_hash);
-        script
-    }
-
-    /// Build a P2TR scriptPubKey from an x-only public key.
-    /// Format: OP_1 <32-byte-x-only-pubkey>
-    fn build_p2tr_script(x_only_pubkey: &[u8; 32]) -> Vec<u8> {
-        let mut script = Vec::with_capacity(34);
-        script.push(0x51); // OP_1 (witness version 1)
-        script.push(0x20); // Push 32 bytes
-        script.extend_from_slice(x_only_pubkey);
-        script
-    }
-
     /// Sign a hash using BIP340 Schnorr signature (for Taproot).
     ///
     /// Returns a 64-byte Schnorr signature.
@@ -775,47 +333,6 @@ impl BtcSignerMidlMetadataProvider {
         let signature = schnorr_key.sign(hash);
         let sig_bytes: [u8; 64] = signature.to_bytes().into();
         Ok(sig_bytes)
-    }
-}
-
-/// Read a Bitcoin varint from a byte slice.
-/// Returns (value, bytes_read).
-fn read_varint(data: &[u8]) -> (u64, usize) {
-    if data.is_empty() {
-        return (0, 0);
-    }
-    match data[0] {
-        0xff if data.len() >= 9 => {
-            let value = u64::from_le_bytes([
-                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
-            ]);
-            (value, 9)
-        }
-        0xfe if data.len() >= 5 => {
-            let value = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as u64;
-            (value, 5)
-        }
-        0xfd if data.len() >= 3 => {
-            let value = u16::from_le_bytes([data[1], data[2]]) as u64;
-            (value, 3)
-        }
-        _ => (data[0] as u64, 1),
-    }
-}
-
-/// Push a variable-length integer (varint) to a buffer.
-fn push_varint(buf: &mut Vec<u8>, value: u64) {
-    if value < 0xfd {
-        buf.push(value as u8);
-    } else if value <= 0xffff {
-        buf.push(0xfd);
-        buf.extend_from_slice(&(value as u16).to_le_bytes());
-    } else if value <= 0xffffffff {
-        buf.push(0xfe);
-        buf.extend_from_slice(&(value as u32).to_le_bytes());
-    } else {
-        buf.push(0xff);
-        buf.extend_from_slice(&value.to_le_bytes());
     }
 }
 
@@ -918,28 +435,51 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         let pubkey_32 = self.signer.public_key_32();
         let btc_address_byte = self.signer.btc_address_byte();
 
-        // Build change script and sign each input
+        // Build change script
+        let change_script: ScriptBuf;
         let mut all_signatures: Vec<Vec<u8>> = Vec::with_capacity(utxos.len());
         let mut all_pubkeys: Vec<Vec<u8>> = Vec::with_capacity(utxos.len());
-        let change_script: Vec<u8>;
 
         if is_taproot {
             // P2TR: Use x-only pubkey for script and Schnorr signature
-            change_script = Self::build_p2tr_script(pubkey_32);
+            change_script = build_p2tr_script_untweaked(pubkey_32);
 
+            // Build unsigned transaction once
+            let unsigned_tx = build_unsigned_tx(
+                &utxos,
+                &tss_pubkey,
+                tss_value,
+                change_value,
+                &change_script,
+                &evm_tx_hash,
+            );
+
+            // Build prevouts for all inputs (all use same script)
+            let prevouts: Vec<TxOut> = utxos
+                .iter()
+                .map(|u| TxOut {
+                    value: Amount::from_sat(u.value),
+                    script_pubkey: build_p2tr_script_untweaked(pubkey_32),
+                })
+                .collect();
+
+            // Compute sighashes and sign each input
+            let mut cache = SighashCache::new(&unsigned_tx);
             for input_index in 0..utxos.len() {
-                let sighash = Self::compute_bip341_sighash(
-                    &utxos,
-                    input_index,
-                    pubkey_32,
-                    &tss_pubkey,
-                    tss_value,
-                    change_value,
-                    &change_script,
-                    &evm_tx_hash,
-                );
+                let sighash = cache
+                    .taproot_key_spend_signature_hash(
+                        input_index,
+                        &Prevouts::All(&prevouts),
+                        TapSighashType::Default,
+                    )
+                    .map_err(|e| {
+                        ChainCommunicationError::CustomError(format!(
+                            "Failed to compute taproot sighash for input {}: {}",
+                            input_index, e
+                        ))
+                    })?;
 
-                let schnorr_sig = self.sign_schnorr(&sighash)?;
+                let schnorr_sig = self.sign_schnorr(&sighash.to_byte_array())?;
                 all_signatures.push(schnorr_sig.to_vec());
                 all_pubkeys.push(pubkey_32.to_vec());
             }
@@ -948,61 +488,89 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             let mut full_pubkey = vec![btc_address_byte];
             full_pubkey.extend_from_slice(pubkey_32);
 
-            let pubkey_hash = Self::hash160(&full_pubkey);
-            change_script = Self::build_p2wpkh_script(&pubkey_hash);
+            let pubkey_hash = bitcoin::hashes::hash160::Hash::hash(&full_pubkey).to_byte_array();
+            let wpkh = WPubkeyHash::from_byte_array(pubkey_hash);
+            change_script = ScriptBuf::new_p2wpkh(&wpkh);
 
+            // Build unsigned transaction once
+            let unsigned_tx = build_unsigned_tx(
+                &utxos,
+                &tss_pubkey,
+                tss_value,
+                change_value,
+                &change_script,
+                &evm_tx_hash,
+            );
+
+            // Compute sighashes and sign each input
+            let mut cache = SighashCache::new(&unsigned_tx);
             for input_index in 0..utxos.len() {
-                let sighash = Self::compute_bip143_sighash(
-                    &utxos,
-                    input_index,
-                    &pubkey_hash,
-                    &tss_pubkey,
-                    tss_value,
-                    change_value,
-                    &change_script,
-                    &evm_tx_hash,
-                );
+                let sighash = cache
+                    .p2wpkh_signature_hash(
+                        input_index,
+                        &ScriptBuf::new_p2wpkh(&wpkh),
+                        Amount::from_sat(utxos[input_index].value),
+                        EcdsaSighashType::All,
+                    )
+                    .map_err(|e| {
+                        ChainCommunicationError::CustomError(format!(
+                            "Failed to compute P2WPKH sighash for input {}: {}",
+                            input_index, e
+                        ))
+                    })?;
 
-                let signature = self.signer.sign_hash(&sighash).map_err(|e| {
-                    ChainCommunicationError::CustomError(format!(
-                        "Failed to sign Bitcoin transaction input {}: {}",
-                        input_index, e
-                    ))
-                })?;
+                let der_sig = self
+                    .signer
+                    .sign_hash_der(&sighash.to_byte_array())
+                    .map_err(|e| {
+                        ChainCommunicationError::CustomError(format!(
+                            "Failed to sign Bitcoin transaction input {}: {}",
+                            input_index, e
+                        ))
+                    })?;
 
-                let r_bytes = {
-                    let mut r = [0u8; 32];
-                    signature.r.to_big_endian(&mut r);
-                    r
-                };
-                let s_bytes = {
-                    let mut s = [0u8; 32];
-                    signature.s.to_big_endian(&mut s);
-                    s
-                };
-                all_signatures.push(Self::encode_der_signature(&r_bytes, &s_bytes));
+                all_signatures.push(der_sig);
                 all_pubkeys.push(full_pubkey.clone());
             }
         }
 
-        // Build the Bitcoin transaction with all inputs
-        let btc_tx = self.build_btc_transaction(
+        // Fill witnesses on a mutable copy of the unsigned transaction
+        let mut signed_tx = build_unsigned_tx(
             &utxos,
-            &evm_tx_hash,
-            &all_signatures,
-            &all_pubkeys,
             &tss_pubkey,
             tss_value,
             change_value,
             &change_script,
-            is_taproot,
-        )?;
+            &evm_tx_hash,
+        );
 
-        // Compute the BTC transaction hash (txid without witness)
-        let btc_tx_hash = Self::compute_btc_tx_hash(&btc_tx);
+        for (i, input) in signed_tx.input.iter_mut().enumerate() {
+            if is_taproot {
+                // P2TR key-path spend: single witness item (64-byte Schnorr signature)
+                // For SIGHASH_DEFAULT, no sighash byte is appended
+                let mut witness = Witness::new();
+                witness.push(&all_signatures[i]);
+                input.witness = witness;
+            } else {
+                // P2WPKH: two witness items (signature with SIGHASH_ALL + pubkey)
+                let mut witness = Witness::new();
+                let mut sig_with_hashtype = all_signatures[i].clone();
+                sig_with_hashtype.push(EcdsaSighashType::All as u8);
+                witness.push(&sig_with_hashtype);
+                witness.push(&all_pubkeys[i]);
+                input.witness = witness;
+            }
+        }
+
+        // Serialize the signed transaction
+        let btc_tx = btc_encode::serialize(&signed_tx);
+
+        // Compute the BTC transaction hash (txid)
+        let mut txid_bytes = signed_tx.compute_txid().to_byte_array();
+        txid_bytes.reverse(); // internal order → display order for H256
 
         debug!(
-            btc_tx_hash = ?hex::encode(&btc_tx_hash),
+            btc_tx_hash = ?hex::encode(&txid_bytes),
             evm_tx_hash = ?hex::encode(&evm_tx_hash),
             num_inputs = utxos.len(),
             total_input_value = total_utxo_value,
@@ -1016,7 +584,7 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         );
 
         Ok(MidlPreparedMetadata {
-            btc_tx_hash: H256::from_slice(&btc_tx_hash),
+            btc_tx_hash: H256::from_slice(&txid_bytes),
             btc_transaction: Bytes::from(btc_tx),
             public_key: Bytes::from(pubkey_32.to_vec()),
             btc_address_byte: U256::from(btc_address_byte),

@@ -1308,6 +1308,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58ck"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c8d66485a3a2ea485c1913c4572ce0256067a5377ac8c75c4960e1cda98605f"
+dependencies = [
+ "bitcoin-internals",
+ "bitcoin_hashes",
+]
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,6 +1417,54 @@ dependencies = [
  "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.109",
+]
+
+[[package]]
+name = "bitcoin"
+version = "0.32.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e499f9fc0407f50fe98af744ab44fa67d409f76b6772e1689ec8485eb0c0f66"
+dependencies = [
+ "base58ck",
+ "bech32 0.11.0",
+ "bitcoin-internals",
+ "bitcoin-io",
+ "bitcoin-units",
+ "bitcoin_hashes",
+ "hex-conservative",
+ "hex_lit",
+ "secp256k1 0.29.1",
+]
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30bdbe14aa07b06e6cfeffc529a1f099e5fbe249524f8125358604df99a4bed2"
+
+[[package]]
+name = "bitcoin-io"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2dee39a0ee5b4095224a0cfc6bf4cc1baf0f9624b96b367e53b66d974e51d953"
+
+[[package]]
+name = "bitcoin-units"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5285c8bcaa25876d07f37e3d30c303f2609179716e11d688f51e8f1fe70063e2"
+dependencies = [
+ "bitcoin-internals",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26ec84b80c482df901772e931a9a681e26a1b9ee2302edeff23cb30328745c8b"
+dependencies = [
+ "bitcoin-io",
+ "hex-conservative",
 ]
 
 [[package]]
@@ -5545,10 +5603,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-conservative"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fda06d18ac606267c40c04e41b9947729bf8b9efe74bd4e82b61a5f26a510b9f"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "hex-literal"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
+name = "hex_lit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
 
 [[package]]
 name = "histogram"
@@ -5949,7 +6022,7 @@ dependencies = [
  "hyperlane-sealevel",
  "hyperlane-starknet",
  "hyperlane-test",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "maplit",
  "mockall",
  "moka",
@@ -6005,7 +6078,7 @@ dependencies = [
  "getrandom 0.2.15",
  "hex 0.4.3",
  "hyperlane-application",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "num 0.4.3",
  "num-derive 0.4.2",
  "num-traits",
@@ -6053,7 +6126,7 @@ dependencies = [
  "ibc-proto",
  "injective-protobuf",
  "injective-std",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "once_cell",
  "pin-project",
  "protobuf",
@@ -6128,7 +6201,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "num 0.4.3",
  "num-traits",
  "reqwest 0.11.27",
@@ -6180,6 +6253,7 @@ dependencies = [
  "abigen",
  "async-trait",
  "bech32 0.11.0",
+ "bitcoin",
  "dashmap",
  "derive-new",
  "ethers",
@@ -6195,14 +6269,13 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "k256 0.13.4",
  "num 0.4.3",
  "num-traits",
  "once_cell",
  "reqwest 0.11.27",
  "reqwest-utils",
- "ripemd",
  "serde",
  "serde_json",
  "sha2 0.10.8",
@@ -6243,7 +6316,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-warp-route",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "once_cell",
  "radix-common",
  "radix-engine-interface",
@@ -7066,7 +7139,7 @@ dependencies = [
  "hyperlane-midl",
  "hyperlane-radix",
  "hyperlane-sealevel",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "mockall",
  "prometheus",
  "radix-common",
@@ -9460,7 +9533,7 @@ dependencies = [
  "hyperlane-metric",
  "hyperlane-operation-verifier",
  "hyperlane-test",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "lander",
  "maplit",
  "mockall",
@@ -10345,7 +10418,7 @@ dependencies = [
  "hyperlane-core",
  "hyperlane-ethereum",
  "hyperlane-test",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "migration",
  "num-bigint 0.4.6",
  "num-traits",
@@ -10637,6 +10710,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "secp256k1"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
+dependencies = [
+ "bitcoin_hashes",
+ "secp256k1-sys 0.10.1",
+]
+
+[[package]]
 name = "secp256k1-sys"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10650,6 +10733,15 @@ name = "secp256k1-sys"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5d1746aae42c19d583c3c1a8c646bfad910498e2051c551a7f2e3c0c9fbb7eb"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "secp256k1-sys"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4387882333d3aa8cb20530a17c69a3752e97837832f34f6dccc760e715001d9"
 dependencies = [
  "cc",
 ]
@@ -14709,7 +14801,7 @@ dependencies = [
  "hyperlane-ethereum",
  "hyperlane-midl",
  "hyperlane-test",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "k256 0.13.4",
  "mockall",
  "prometheus",
