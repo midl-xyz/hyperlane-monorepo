@@ -166,12 +166,15 @@ impl std::fmt::Debug for MempoolUtxoProvider {
 
 #[async_trait]
 impl UtxoProvider for MempoolUtxoProvider {
-    async fn get_utxo(&self, min_value: u64) -> Result<BtcUtxo, ChainCommunicationError> {
+    async fn get_utxos(
+        &self,
+        min_total_value: u64,
+    ) -> Result<Vec<BtcUtxo>, ChainCommunicationError> {
         let utxos = self.fetch_utxos().await?;
         let current_height = self.get_block_height().await?;
 
-        // Filter UTXOs by confirmation count and find one with sufficient value
-        let suitable_utxo = utxos
+        // Filter for confirmed UTXOs with enough confirmations, sort by value descending
+        let mut confirmed: Vec<MempoolUtxo> = utxos
             .into_iter()
             .filter(|utxo| {
                 if !utxo.status.confirmed {
@@ -182,39 +185,56 @@ impl UtxoProvider for MempoolUtxoProvider {
                     .block_height
                     .map(|h| current_height.saturating_sub(h) + 1)
                     .unwrap_or(0);
-                confirmations >= self.min_confirmations && utxo.value >= min_value
+                confirmations >= self.min_confirmations
             })
-            .max_by_key(|utxo| utxo.value);
+            .collect();
+        confirmed.sort_by(|a, b| b.value.cmp(&a.value));
 
-        match suitable_utxo {
-            Some(utxo) => {
-                debug!(
-                    txid = %utxo.txid,
-                    vout = utxo.vout,
-                    value = utxo.value,
-                    "Selected UTXO for transaction"
-                );
-
-                Ok(BtcUtxo {
-                    tx_hash: Self::hex_to_txid(&utxo.txid)?,
-                    vout: utxo.vout,
-                    value: utxo.value,
-                    script_pubkey: vec![], // Will be filled by the transaction builder
-                })
-            }
-            None => {
-                warn!(
-                    address = %self.bitcoin_address,
-                    min_value = min_value,
-                    min_confirmations = self.min_confirmations,
-                    "No suitable UTXO found"
-                );
-                Err(ChainCommunicationError::CustomError(format!(
-                    "No UTXO found with at least {} satoshis and {} confirmations for address {}",
-                    min_value, self.min_confirmations, self.bitcoin_address
-                )))
+        // Accumulate UTXOs until their sum >= min_total_value
+        let mut selected = Vec::new();
+        let mut total: u64 = 0;
+        for utxo in confirmed {
+            total = total.saturating_add(utxo.value);
+            debug!(
+                txid = %utxo.txid,
+                vout = utxo.vout,
+                value = utxo.value,
+                running_total = total,
+                "Selected UTXO for transaction"
+            );
+            selected.push(BtcUtxo {
+                tx_hash: Self::hex_to_txid(&utxo.txid)?,
+                vout: utxo.vout,
+                value: utxo.value,
+                script_pubkey: vec![], // Will be filled by the transaction builder
+            });
+            if total >= min_total_value {
+                break;
             }
         }
+
+        if total < min_total_value {
+            warn!(
+                address = %self.bitcoin_address,
+                min_total_value = min_total_value,
+                available = total,
+                min_confirmations = self.min_confirmations,
+                "Insufficient confirmed balance across all UTXOs"
+            );
+            return Err(ChainCommunicationError::CustomError(format!(
+                "Insufficient balance: need {} satoshis but only {} available across {} UTXOs with {} confirmations for address {}",
+                min_total_value, total, selected.len(), self.min_confirmations, self.bitcoin_address
+            )));
+        }
+
+        debug!(
+            count = selected.len(),
+            total_value = total,
+            min_total_value = min_total_value,
+            "Selected UTXOs for transaction"
+        );
+
+        Ok(selected)
     }
 }
 

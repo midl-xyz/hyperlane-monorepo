@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,7 +9,7 @@ use ethers::prelude::FromErr;
 use ethers::providers::{Middleware, PendingTransaction};
 use ethers::types::transaction::eip2718::TypedTransaction;
 use ethers::types::transaction::midl::MidlTransactionRequest;
-use ethers::types::{Bytes, U256};
+use ethers::types::{Address, Bytes, TransactionRequest, U256};
 use ethers_core::utils::rlp;
 use ethers_signers::Signer;
 use hyperlane_core::{ChainCommunicationError, H256};
@@ -76,12 +77,19 @@ pub struct BtcUtxo {
 /// Trait for providing UTXOs for Bitcoin transaction building.
 #[async_trait]
 pub trait UtxoProvider: Send + Sync {
-    /// Get a UTXO with at least the specified value in satoshis.
-    async fn get_utxo(&self, min_value: u64) -> Result<BtcUtxo, ChainCommunicationError>;
+    /// Get UTXOs whose total value is at least `min_total_value` satoshis.
+    /// Returns a vector of UTXOs selected using largest-first accumulation.
+    async fn get_utxos(
+        &self,
+        min_total_value: u64,
+    ) -> Result<Vec<BtcUtxo>, ChainCommunicationError>;
 }
 
 /// GlobalParams contract address for fetching TSS address
-const GLOBAL_PARAMS_CONTRACT: &str = "0x0000000000000000000000000000000000001006";
+static GLOBAL_PARAMS_CONTRACT: std::sync::LazyLock<Address> = std::sync::LazyLock::new(|| {
+    Address::from_str("0x0000000000000000000000000000000000001006")
+        .expect("Invalid GLOBAL_PARAMS_CONTRACT address")
+});
 
 /// Function selector for getTSSAddress() - 0x15b0162f
 const GET_TSS_ADDRESS_SELECTOR: [u8; 4] = [0x15, 0xb0, 0x16, 0x2f];
@@ -97,11 +105,9 @@ pub struct BtcSignerMidlMetadataProvider {
     default_fee_rate: u64,
     /// Optional mempool URL for dynamic fee estimation
     mempool_url: Option<String>,
-    rpc_url: String,
+    provider: ethers::providers::Provider<ethers::providers::Http>,
     /// Cached TSS x-only public key (32 bytes)
     tss_pubkey: tokio::sync::OnceCell<[u8; 32]>,
-    /// Bitcoin network (for TSS address encoding)
-    bitcoin_network: crate::signer::BitcoinNetwork,
 }
 
 impl BtcSignerMidlMetadataProvider {
@@ -111,22 +117,20 @@ impl BtcSignerMidlMetadataProvider {
     /// * `signer` - The BtcSigner to use for signing
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate in satoshis per virtual byte
-    /// * `rpc_url` - RPC URL for fetching TSS address
+    /// * `provider` - Ethers provider for fetching TSS address
     pub fn new(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
-        rpc_url: String,
+        provider: ethers::providers::Provider<ethers::providers::Http>,
     ) -> Self {
-        let bitcoin_network = signer.network();
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: None,
-            rpc_url,
+            provider,
             tss_pubkey: tokio::sync::OnceCell::new(),
-            bitcoin_network,
         }
     }
 
@@ -137,23 +141,21 @@ impl BtcSignerMidlMetadataProvider {
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate (fallback if API fails)
     /// * `mempool_url` - URL for mempool API to fetch fee rates
-    /// * `rpc_url` - RPC URL for fetching TSS address
+    /// * `provider` - Ethers provider for fetching TSS address
     pub fn with_mempool_url(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
         mempool_url: String,
-        rpc_url: String,
+        provider: ethers::providers::Provider<ethers::providers::Http>,
     ) -> Self {
-        let bitcoin_network = signer.network();
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: Some(mempool_url),
-            rpc_url,
+            provider,
             tss_pubkey: tokio::sync::OnceCell::new(),
-            bitcoin_network,
         }
     }
 
@@ -168,53 +170,17 @@ impl BtcSignerMidlMetadataProvider {
 
     /// Fetch TSS address from GlobalParams contract via eth_call.
     async fn fetch_tss_pubkey_from_contract(&self) -> Result<[u8; 32], ChainCommunicationError> {
-        use serde_json::{json, Value};
+        use ethers::providers::Middleware as _;
 
-        let client = reqwest::Client::new();
+        let tx = TransactionRequest::new()
+            .to(*GLOBAL_PARAMS_CONTRACT)
+            .data(Bytes::from(GET_TSS_ADDRESS_SELECTOR.to_vec()));
 
-        // Build the eth_call request
-        let call_data = format!("0x{}", hex::encode(GET_TSS_ADDRESS_SELECTOR));
-        let request_body = json!({
-            "jsonrpc": "2.0",
-            "method": "eth_call",
-            "params": [{
-                "to": GLOBAL_PARAMS_CONTRACT,
-                "data": call_data
-            }, "latest"],
-            "id": 1
-        });
-
-        let response = client
-            .post(&self.rpc_url)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                ChainCommunicationError::CustomError(format!(
-                    "Failed to fetch TSS address from GlobalParams: {}",
-                    e
-                ))
-            })?;
-
-        let response_json: Value = response.json().await.map_err(|e| {
+        let result_bytes = self.provider.call(&tx.into(), None).await.map_err(|e| {
             ChainCommunicationError::CustomError(format!(
-                "Failed to parse TSS address response: {}",
+                "Failed to fetch TSS address from GlobalParams: {}",
                 e
             ))
-        })?;
-
-        // Extract the result (bytes32 = x-only public key)
-        let result_hex = response_json["result"].as_str().ok_or_else(|| {
-            ChainCommunicationError::CustomError(format!(
-                "Invalid TSS address response: {:?}",
-                response_json
-            ))
-        })?;
-
-        // Remove 0x prefix and decode
-        let result_hex = result_hex.strip_prefix("0x").unwrap_or(result_hex);
-        let result_bytes = hex::decode(result_hex).map_err(|e| {
-            ChainCommunicationError::CustomError(format!("Failed to decode TSS address hex: {}", e))
         })?;
 
         // bytes32 = 32 bytes
@@ -243,11 +209,6 @@ impl BtcSignerMidlMetadataProvider {
         script.push(0x20); // Push 32 bytes
         script.extend_from_slice(x_only_pubkey);
         script
-    }
-
-    /// Get the HRP (human-readable part) for bech32m encoding based on network.
-    fn get_network_hrp(&self) -> &'static str {
-        self.bitcoin_network.hrp()
     }
 
     /// Fetch the current fee rate from mempool API or use default.
@@ -315,8 +276,12 @@ impl BtcSignerMidlMetadataProvider {
     /// Compute the BIP143 sighash for a P2WPKH input.
     ///
     /// BIP143 defines the sighash algorithm for SegWit (witness version 0) transactions.
+    /// When spending multiple inputs, `hashPrevouts` and `hashSequence` cover ALL inputs,
+    /// while the per-input fields (outpoint, scriptCode, value, nSequence) use the
+    /// input at `input_index`.
     fn compute_bip143_sighash(
-        utxo: &BtcUtxo,
+        utxos: &[BtcUtxo],
+        input_index: usize,
         pubkey_hash: &[u8; 20],
         tss_pubkey: &[u8; 32],
         tss_value: u64,
@@ -331,24 +296,33 @@ impl BtcSignerMidlMetadataProvider {
         // 1. nVersion (2 for SegWit)
         preimage.extend_from_slice(&2u32.to_le_bytes());
 
-        // 2. hashPrevouts - double SHA256 of all outpoints
+        // 2. hashPrevouts - double SHA256 of ALL outpoints
         let mut prevouts = Vec::new();
-        let mut txid_reversed = utxo.tx_hash;
-        txid_reversed.reverse();
-        prevouts.extend_from_slice(&txid_reversed);
-        prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
+        for utxo in utxos {
+            let mut txid_reversed = utxo.tx_hash;
+            txid_reversed.reverse();
+            prevouts.extend_from_slice(&txid_reversed);
+            prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
+        }
         let hash_prevouts = Self::double_sha256(&prevouts);
         preimage.extend_from_slice(&hash_prevouts);
 
-        // 3. hashSequence - double SHA256 of all sequences
+        // 3. hashSequence - double SHA256 of ALL sequences
         // MIDL requires nSequence = 0xffffffff (final, no RBF)
         let sequence = 0xffffffffu32.to_le_bytes();
-        let hash_sequence = Self::double_sha256(&sequence);
+        let mut sequences = Vec::new();
+        for _ in utxos {
+            sequences.extend_from_slice(&sequence);
+        }
+        let hash_sequence = Self::double_sha256(&sequences);
         preimage.extend_from_slice(&hash_sequence);
 
-        // 4. outpoint being signed
+        // 4. outpoint being signed (this input)
+        let current_utxo = &utxos[input_index];
+        let mut txid_reversed = current_utxo.tx_hash;
+        txid_reversed.reverse();
         preimage.extend_from_slice(&txid_reversed);
-        preimage.extend_from_slice(&utxo.vout.to_le_bytes());
+        preimage.extend_from_slice(&current_utxo.vout.to_le_bytes());
 
         // 5. scriptCode for P2WPKH
         let mut script_code = Vec::new();
@@ -361,10 +335,10 @@ impl BtcSignerMidlMetadataProvider {
         script_code.push(0xac); // OP_CHECKSIG
         preimage.extend_from_slice(&script_code);
 
-        // 6. value of the UTXO being spent
-        preimage.extend_from_slice(&utxo.value.to_le_bytes());
+        // 6. value of the UTXO being spent (this input)
+        preimage.extend_from_slice(&current_utxo.value.to_le_bytes());
 
-        // 7. nSequence
+        // 7. nSequence (this input)
         preimage.extend_from_slice(&sequence);
 
         // 8. hashOutputs - double SHA256 of all outputs
@@ -391,8 +365,11 @@ impl BtcSignerMidlMetadataProvider {
     ///
     /// BIP341 defines the sighash algorithm for Taproot transactions.
     /// For key-path spending with SIGHASH_DEFAULT (0x00), we use a tagged hash.
+    /// When spending multiple inputs, `sha_prevouts`, `sha_amounts`,
+    /// `sha_scriptpubkeys`, and `sha_sequences` cover ALL inputs.
     fn compute_bip341_sighash(
-        utxo: &BtcUtxo,
+        utxos: &[BtcUtxo],
+        input_index: usize,
         x_only_pubkey: &[u8; 32],
         tss_pubkey: &[u8; 32],
         tss_value: u64,
@@ -415,9 +392,6 @@ impl BtcSignerMidlMetadataProvider {
             out
         }
 
-        let mut txid_reversed = utxo.tx_hash;
-        txid_reversed.reverse();
-
         // Build the sighash message for SIGHASH_DEFAULT (0x00)
         let mut sig_msg = Vec::new();
 
@@ -433,30 +407,45 @@ impl BtcSignerMidlMetadataProvider {
         // nLockTime (4 bytes)
         sig_msg.extend_from_slice(&0u32.to_le_bytes());
 
-        // sha_prevouts - SHA256 of all outpoints
+        // sha_prevouts - SHA256 of ALL outpoints
         let mut prevouts = Vec::new();
-        prevouts.extend_from_slice(&txid_reversed);
-        prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
+        for utxo in utxos {
+            let mut txid_reversed = utxo.tx_hash;
+            txid_reversed.reverse();
+            prevouts.extend_from_slice(&txid_reversed);
+            prevouts.extend_from_slice(&utxo.vout.to_le_bytes());
+        }
         let sha_prevouts = Sha256::digest(&prevouts);
         sig_msg.extend_from_slice(&sha_prevouts);
 
-        // sha_amounts - SHA256 of all input amounts
-        let sha_amounts = Sha256::digest(&utxo.value.to_le_bytes());
+        // sha_amounts - SHA256 of ALL input amounts
+        let mut amounts = Vec::new();
+        for utxo in utxos {
+            amounts.extend_from_slice(&utxo.value.to_le_bytes());
+        }
+        let sha_amounts = Sha256::digest(&amounts);
         sig_msg.extend_from_slice(&sha_amounts);
 
-        // sha_scriptpubkeys - SHA256 of all input scriptPubKeys
-        // For P2TR: OP_1 <32-byte x-only pubkey>
-        let mut scriptpubkey = Vec::new();
-        scriptpubkey.push(0x22); // Length (34 bytes)
-        scriptpubkey.push(0x51); // OP_1 (witness version 1)
-        scriptpubkey.push(0x20); // Push 32 bytes
-        scriptpubkey.extend_from_slice(x_only_pubkey);
-        let sha_scriptpubkeys = Sha256::digest(&scriptpubkey);
+        // sha_scriptpubkeys - SHA256 of ALL input scriptPubKeys
+        // For P2TR: length-prefixed OP_1 <32-byte x-only pubkey>
+        // All inputs use the same signer, so they share the same scriptPubKey
+        let mut scriptpubkeys = Vec::new();
+        for _ in utxos {
+            scriptpubkeys.push(0x22); // Length (34 bytes)
+            scriptpubkeys.push(0x51); // OP_1 (witness version 1)
+            scriptpubkeys.push(0x20); // Push 32 bytes
+            scriptpubkeys.extend_from_slice(x_only_pubkey);
+        }
+        let sha_scriptpubkeys = Sha256::digest(&scriptpubkeys);
         sig_msg.extend_from_slice(&sha_scriptpubkeys);
 
-        // sha_sequences - SHA256 of all sequences
+        // sha_sequences - SHA256 of ALL sequences
         // MIDL requires nSequence = 0xffffffff (final, no RBF)
-        let sha_sequences = Sha256::digest(&0xffffffffu32.to_le_bytes());
+        let mut sequences = Vec::new();
+        for _ in utxos {
+            sequences.extend_from_slice(&0xffffffffu32.to_le_bytes());
+        }
+        let sha_sequences = Sha256::digest(&sequences);
         sig_msg.extend_from_slice(&sha_sequences);
 
         // sha_outputs - SHA256 of all outputs
@@ -473,8 +462,8 @@ impl BtcSignerMidlMetadataProvider {
         // spend_type (1 byte) - 0x00 for key-path spend with no annex
         sig_msg.push(0x00);
 
-        // input_index (4 bytes) - we only have one input
-        sig_msg.extend_from_slice(&0u32.to_le_bytes());
+        // input_index (4 bytes)
+        sig_msg.extend_from_slice(&(input_index as u32).to_le_bytes());
 
         // Compute the tagged hash "TapSighash"
         tagged_hash("TapSighash", &sig_msg)
@@ -547,16 +536,16 @@ impl BtcSignerMidlMetadataProvider {
 
     /// Build a Bitcoin transaction for MIDL with TSS output, OP_RETURN, and optional change.
     ///
-    /// Creates a transaction that spends a UTXO and creates:
+    /// Creates a transaction that spends one or more UTXOs and creates:
     /// - Output 0: TSS output (P2TR to TSS taproot address with funding amount)
     /// - Output 1: OP_RETURN output containing the EVM transaction hash (commitment data)
     /// - Output 2: Change output (if change_value > 0)
     ///
     /// # Arguments
-    /// * `utxo` - The UTXO to spend
+    /// * `utxos` - The UTXOs to spend (one input per UTXO)
     /// * `evm_tx_hash` - The EVM transaction hash to embed in OP_RETURN
-    /// * `signature` - The signature (DER for P2WPKH, Schnorr for P2TR)
-    /// * `pubkey` - The public key (33 bytes compressed for P2WPKH, 32 bytes x-only for P2TR)
+    /// * `signatures` - Per-input signatures (DER for P2WPKH, Schnorr for P2TR)
+    /// * `pubkeys` - Per-input public keys (33 bytes compressed for P2WPKH, 32 bytes x-only for P2TR)
     /// * `tss_pubkey` - The TSS x-only public key (32 bytes)
     /// * `tss_value` - The value to send to the TSS address
     /// * `change_value` - Amount to return as change (0 for no change output)
@@ -564,10 +553,10 @@ impl BtcSignerMidlMetadataProvider {
     /// * `is_taproot` - Whether this is a Taproot (P2TR) transaction
     fn build_btc_transaction(
         &self,
-        utxo: &BtcUtxo,
+        utxos: &[BtcUtxo],
         evm_tx_hash: &[u8; 32],
-        signature: &[u8],
-        pubkey: &[u8],
+        signatures: &[Vec<u8>],
+        pubkeys: &[Vec<u8>],
         tss_pubkey: &[u8; 32],
         tss_value: u64,
         change_value: u64,
@@ -583,27 +572,29 @@ impl BtcSignerMidlMetadataProvider {
         tx.push(0x00);
         tx.push(0x01);
 
-        // Input count (1 input)
-        tx.push(0x01);
+        // Input count
+        push_varint(&mut tx, utxos.len() as u64);
 
-        // Input: previous output
-        // txid (reversed for Bitcoin)
-        let mut txid_reversed = utxo.tx_hash;
-        txid_reversed.reverse();
-        tx.extend_from_slice(&txid_reversed);
+        // Serialize each input
+        for utxo in utxos {
+            // txid (reversed for Bitcoin)
+            let mut txid_reversed = utxo.tx_hash;
+            txid_reversed.reverse();
+            tx.extend_from_slice(&txid_reversed);
 
-        // vout
-        tx.extend_from_slice(&utxo.vout.to_le_bytes());
+            // vout
+            tx.extend_from_slice(&utxo.vout.to_le_bytes());
 
-        // Script sig (empty for SegWit)
-        tx.push(0x00);
+            // Script sig (empty for SegWit)
+            tx.push(0x00);
 
-        // Sequence (0xffffffff = final, required by MIDL - no RBF, no relative locktime)
-        tx.extend_from_slice(&0xffffffffu32.to_le_bytes());
+            // Sequence (0xffffffff = final, required by MIDL - no RBF, no relative locktime)
+            tx.extend_from_slice(&0xffffffffu32.to_le_bytes());
+        }
 
         // Output count: TSS + OP_RETURN + optional change
-        let output_count = if change_value > 0 { 3u8 } else { 2u8 };
-        tx.push(output_count);
+        let output_count = if change_value > 0 { 3u64 } else { 2u64 };
+        push_varint(&mut tx, output_count);
 
         // Output 0: TSS output (P2TR)
         let tss_script = Self::build_tss_p2tr_script(tss_pubkey);
@@ -626,25 +617,27 @@ impl BtcSignerMidlMetadataProvider {
             tx.extend_from_slice(change_script);
         }
 
-        // Witness data (for the single input)
-        if is_taproot {
-            // P2TR key-path spend: single witness item (64-byte Schnorr signature)
-            // For SIGHASH_DEFAULT, no sighash byte is appended
-            tx.push(0x01); // Number of witness items
-            push_varint(&mut tx, signature.len() as u64);
-            tx.extend_from_slice(signature);
-        } else {
-            // P2WPKH: two witness items (signature + pubkey)
-            tx.push(0x02); // Number of witness items
+        // Witness data for each input
+        for i in 0..utxos.len() {
+            if is_taproot {
+                // P2TR key-path spend: single witness item (64-byte Schnorr signature)
+                // For SIGHASH_DEFAULT, no sighash byte is appended
+                tx.push(0x01); // Number of witness items
+                push_varint(&mut tx, signatures[i].len() as u64);
+                tx.extend_from_slice(&signatures[i]);
+            } else {
+                // P2WPKH: two witness items (signature + pubkey)
+                tx.push(0x02); // Number of witness items
 
-            // Witness item 1: signature (with SIGHASH_ALL)
-            let sig_with_hashtype = [signature, &[0x01]].concat();
-            push_varint(&mut tx, sig_with_hashtype.len() as u64);
-            tx.extend_from_slice(&sig_with_hashtype);
+                // Witness item 1: signature (with SIGHASH_ALL)
+                let sig_with_hashtype = [&signatures[i][..], &[0x01]].concat();
+                push_varint(&mut tx, sig_with_hashtype.len() as u64);
+                tx.extend_from_slice(&sig_with_hashtype);
 
-            // Witness item 2: public key (33 bytes compressed)
-            push_varint(&mut tx, pubkey.len() as u64);
-            tx.extend_from_slice(pubkey);
+                // Witness item 2: public key (33 bytes compressed)
+                push_varint(&mut tx, pubkeys[i].len() as u64);
+                tx.extend_from_slice(&pubkeys[i]);
+            }
         }
 
         // Locktime
@@ -836,6 +829,14 @@ impl std::fmt::Debug for BtcSignerMidlMetadataProvider {
     }
 }
 
+/// Base transaction vsize: version + marker/flag + output count + 3 outputs
+/// (TSS P2TR + OP_RETURN + change) + locktime.
+const BASE_VSIZE: u64 = 120;
+/// Per-input vsize for P2WPKH (witness v0) inputs.
+const P2WPKH_INPUT_VSIZE: u64 = 68;
+/// Per-input vsize for P2TR (witness v1 / Taproot) inputs.
+const P2TR_INPUT_VSIZE: u64 = 58;
+
 #[async_trait]
 impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
     async fn prepare_metadata(
@@ -850,36 +851,62 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         // Get dynamic fee rate from mempool API (or use default)
         let fee_rate = self.get_fee_rate().await;
 
-        // Determine address type and calculate transaction size
+        // Determine address type
         let address_type = self.signer.address_type();
         let is_taproot = matches!(address_type, BtcAddressType::P2TR);
 
-        // Estimate vsize based on address type
-        // With TSS output (P2TR), we now have 3 outputs: TSS + OP_RETURN + change
-        // P2WPKH: ~110 vbytes base + 43 vbytes for TSS output (34 script + 8 value + 1 varint) = ~185 vbytes
-        // P2TR: ~111 vbytes base + 43 vbytes for TSS output = ~197 vbytes
-        let estimated_vsize_with_change = if is_taproot { 197u64 } else { 185u64 };
-        let estimated_fee = estimated_vsize_with_change.saturating_mul(fee_rate);
+        let per_input_vsize = if is_taproot {
+            P2TR_INPUT_VSIZE
+        } else {
+            P2WPKH_INPUT_VSIZE
+        };
 
         // Dust threshold (546 satoshis for standard outputs)
         const DUST_THRESHOLD: u64 = 546;
 
         // TSS funding value - minimum dust threshold for the TSS output
-        // This value is sent to the TSS address
         let tss_value = DUST_THRESHOLD;
 
+        // Initial fee estimate assuming 1 input
+        let initial_fee = BASE_VSIZE
+            .saturating_add(per_input_vsize)
+            .saturating_mul(fee_rate);
+
         // Total required: fee + TSS value + potential change dust
-        let min_utxo_value = estimated_fee
+        let min_utxo_value = initial_fee
             .saturating_add(tss_value)
             .saturating_add(DUST_THRESHOLD);
-        let utxo = self.utxo_provider.get_utxo(min_utxo_value).await?;
+        let utxos = self.utxo_provider.get_utxos(min_utxo_value).await?;
+
+        // Re-estimate fee based on actual input count
+        let num_inputs = utxos.len() as u64;
+        let actual_vsize = BASE_VSIZE.saturating_add(num_inputs.saturating_mul(per_input_vsize));
+        let actual_fee = actual_vsize.saturating_mul(fee_rate);
+
+        // If extra inputs increased the fee, we may need more UTXOs.
+        // Re-fetch only if the current total is now insufficient.
+        let total_utxo_value: u64 = utxos.iter().map(|u| u.value).sum();
+        let min_required = actual_fee
+            .saturating_add(tss_value)
+            .saturating_add(DUST_THRESHOLD);
+
+        let (utxos, total_utxo_value, actual_fee) = if total_utxo_value < min_required {
+            // Need more UTXOs to cover the higher fee
+            let utxos = self.utxo_provider.get_utxos(min_required).await?;
+            let num_inputs = utxos.len() as u64;
+            let vsize = BASE_VSIZE.saturating_add(num_inputs.saturating_mul(per_input_vsize));
+            let fee = vsize.saturating_mul(fee_rate);
+            let total: u64 = utxos.iter().map(|u| u.value).sum();
+            (utxos, total, fee)
+        } else {
+            (utxos, total_utxo_value, actual_fee)
+        };
 
         // Calculate change (if above dust threshold)
-        // change = utxo_value - tss_value - fee
-        let total_output_without_change = tss_value.saturating_add(estimated_fee);
+        let total_output_without_change = tss_value.saturating_add(actual_fee);
         let change_value =
-            if utxo.value > total_output_without_change.saturating_add(DUST_THRESHOLD) {
-                utxo.value.saturating_sub(total_output_without_change)
+            if total_utxo_value > total_output_without_change.saturating_add(DUST_THRESHOLD) {
+                total_utxo_value.saturating_sub(total_output_without_change)
             } else {
                 0 // No change output - remaining goes to fee
             };
@@ -891,78 +918,79 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         let pubkey_32 = self.signer.public_key_32();
         let btc_address_byte = self.signer.btc_address_byte();
 
-        // Build change script based on address type
+        // Build change script and sign each input
+        let mut all_signatures: Vec<Vec<u8>> = Vec::with_capacity(utxos.len());
+        let mut all_pubkeys: Vec<Vec<u8>> = Vec::with_capacity(utxos.len());
         let change_script: Vec<u8>;
-        let signature_bytes: Vec<u8>;
-        let pubkey_for_witness: Vec<u8>;
 
         if is_taproot {
             // P2TR: Use x-only pubkey for script and Schnorr signature
             change_script = Self::build_p2tr_script(pubkey_32);
 
-            // Compute BIP341 sighash
-            let sighash = Self::compute_bip341_sighash(
-                &utxo,
-                pubkey_32,
-                &tss_pubkey,
-                tss_value,
-                change_value,
-                &change_script,
-                &evm_tx_hash,
-            );
+            for input_index in 0..utxos.len() {
+                let sighash = Self::compute_bip341_sighash(
+                    &utxos,
+                    input_index,
+                    pubkey_32,
+                    &tss_pubkey,
+                    tss_value,
+                    change_value,
+                    &change_script,
+                    &evm_tx_hash,
+                );
 
-            // Sign with Schnorr (64 bytes)
-            let schnorr_sig = self.sign_schnorr(&sighash)?;
-            signature_bytes = schnorr_sig.to_vec();
-            pubkey_for_witness = pubkey_32.to_vec(); // x-only pubkey for P2TR
+                let schnorr_sig = self.sign_schnorr(&sighash)?;
+                all_signatures.push(schnorr_sig.to_vec());
+                all_pubkeys.push(pubkey_32.to_vec());
+            }
         } else {
             // P2WPKH/P2SH_P2WPKH: Use compressed pubkey and ECDSA
             let mut full_pubkey = vec![btc_address_byte];
             full_pubkey.extend_from_slice(pubkey_32);
 
-            // Compute public key hash for change script
             let pubkey_hash = Self::hash160(&full_pubkey);
             change_script = Self::build_p2wpkh_script(&pubkey_hash);
 
-            // Compute BIP143 sighash
-            let sighash = Self::compute_bip143_sighash(
-                &utxo,
-                &pubkey_hash,
-                &tss_pubkey,
-                tss_value,
-                change_value,
-                &change_script,
-                &evm_tx_hash,
-            );
+            for input_index in 0..utxos.len() {
+                let sighash = Self::compute_bip143_sighash(
+                    &utxos,
+                    input_index,
+                    &pubkey_hash,
+                    &tss_pubkey,
+                    tss_value,
+                    change_value,
+                    &change_script,
+                    &evm_tx_hash,
+                );
 
-            // Sign with ECDSA and encode as DER
-            let signature = self.signer.sign_hash(&sighash).map_err(|e| {
-                ChainCommunicationError::CustomError(format!(
-                    "Failed to sign Bitcoin transaction: {}",
-                    e
-                ))
-            })?;
+                let signature = self.signer.sign_hash(&sighash).map_err(|e| {
+                    ChainCommunicationError::CustomError(format!(
+                        "Failed to sign Bitcoin transaction input {}: {}",
+                        input_index, e
+                    ))
+                })?;
 
-            let r_bytes = {
-                let mut r = [0u8; 32];
-                signature.r.to_big_endian(&mut r);
-                r
-            };
-            let s_bytes = {
-                let mut s = [0u8; 32];
-                signature.s.to_big_endian(&mut s);
-                s
-            };
-            signature_bytes = Self::encode_der_signature(&r_bytes, &s_bytes);
-            pubkey_for_witness = full_pubkey; // 33-byte compressed pubkey for P2WPKH
+                let r_bytes = {
+                    let mut r = [0u8; 32];
+                    signature.r.to_big_endian(&mut r);
+                    r
+                };
+                let s_bytes = {
+                    let mut s = [0u8; 32];
+                    signature.s.to_big_endian(&mut s);
+                    s
+                };
+                all_signatures.push(Self::encode_der_signature(&r_bytes, &s_bytes));
+                all_pubkeys.push(full_pubkey.clone());
+            }
         }
 
-        // Build the Bitcoin transaction with TSS output as first output
+        // Build the Bitcoin transaction with all inputs
         let btc_tx = self.build_btc_transaction(
-            &utxo,
+            &utxos,
             &evm_tx_hash,
-            &signature_bytes,
-            &pubkey_for_witness,
+            &all_signatures,
+            &all_pubkeys,
             &tss_pubkey,
             tss_value,
             change_value,
@@ -976,12 +1004,12 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
         debug!(
             btc_tx_hash = ?hex::encode(&btc_tx_hash),
             evm_tx_hash = ?hex::encode(&evm_tx_hash),
-            utxo_txid = ?hex::encode(&utxo.tx_hash),
-            utxo_vout = utxo.vout,
-            utxo_value = utxo.value,
+            num_inputs = utxos.len(),
+            total_input_value = total_utxo_value,
             tss_pubkey = ?hex::encode(&tss_pubkey),
             tss_value = tss_value,
             fee_rate = fee_rate,
+            actual_fee = actual_fee,
             change_value = change_value,
             is_taproot = is_taproot,
             "Built signed Bitcoin transaction for MIDL with TSS output"

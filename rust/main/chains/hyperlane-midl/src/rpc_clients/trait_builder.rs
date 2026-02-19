@@ -439,7 +439,10 @@ struct PlaceholderUtxoProvider;
 
 #[async_trait]
 impl UtxoProvider for PlaceholderUtxoProvider {
-    async fn get_utxo(&self, _min_value: u64) -> Result<BtcUtxo, ChainCommunicationError> {
+    async fn get_utxos(
+        &self,
+        _min_total_value: u64,
+    ) -> Result<Vec<BtcUtxo>, ChainCommunicationError> {
         Err(ChainCommunicationError::CustomError(
             "UTXO provider not configured. Please provide UTXOs via configuration or implement a custom UtxoProvider.".to_string()
         ))
@@ -464,6 +467,15 @@ fn build_metadata_provider(
             .first()
             .map(|url| url.to_string())
             .unwrap_or_default();
+
+        let provider = Provider::<Http>::try_from(&rpc_url)
+            .map_err(|e| {
+                ChainCommunicationError::CustomError(format!(
+                    "Failed to create ethers provider from RPC URL: {}",
+                    e
+                ))
+            })
+            .ok()?;
 
         // Create a UTXO provider from config
         let utxo_provider: Arc<dyn UtxoProvider> = if let Some(mempool_url) = conn
@@ -505,7 +517,7 @@ fn build_metadata_provider(
             btc_signer.clone(),
             utxo_provider,
             fee_rate,
-            rpc_url,
+            provider,
         )));
     }
 
