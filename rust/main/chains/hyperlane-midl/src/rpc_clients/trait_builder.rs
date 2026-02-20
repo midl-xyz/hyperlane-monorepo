@@ -449,7 +449,7 @@ impl UtxoProvider for PlaceholderUtxoProvider {
     }
 }
 
-fn build_metadata_provider(
+pub fn build_metadata_provider(
     conn: &ConnectionConf,
     signer: Option<&Signers>,
 ) -> Option<Arc<dyn MidlMetadataProvider>> {

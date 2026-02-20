@@ -951,8 +951,15 @@ impl ChainConf {
                     .await
             }
             ChainConnectionConf::Midl(conf) => {
-                self.build_midl(conf, &locator, metrics, h_midl::ValidatorAnnounceBuilder {})
-                    .await
+                let signer = self.midl_signer().await.context(ctx)?;
+                let metadata_provider = h_midl::build_metadata_provider(conf, signer.as_ref());
+                self.build_midl(
+                    conf,
+                    &locator,
+                    metrics,
+                    h_midl::ValidatorAnnounceBuilder { metadata_provider },
+                )
+                .await
             }
             ChainConnectionConf::Fuel(_) => todo!(),
             ChainConnectionConf::Sealevel(conf) => {

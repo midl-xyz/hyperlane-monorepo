@@ -44,6 +44,13 @@ pub trait MidlMetadataProvider: Send + Sync {
         &self,
         tx: &TypedTransaction,
     ) -> Result<MidlPreparedMetadata, ChainCommunicationError>;
+
+    /// Check whether BTC funds are available for a MIDL transaction.
+    /// Returns `Some(U256::zero())` if sufficient, `Some(deficit)` if not,
+    /// or `None` if the check cannot be performed.
+    async fn check_btc_funds_available(&self) -> Option<U256> {
+        None
+    }
 }
 
 /// Static provider that always returns the same metadata blob. Useful for tests
@@ -66,6 +73,10 @@ impl MidlMetadataProvider for StaticMidlMetadataProvider {
         _tx: &TypedTransaction,
     ) -> Result<MidlPreparedMetadata, ChainCommunicationError> {
         Ok(self.metadata.clone())
+    }
+
+    async fn check_btc_funds_available(&self) -> Option<U256> {
+        Some(U256::zero()) // Static provider = BTC lifecycle managed externally
     }
 }
 
@@ -589,6 +600,42 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             public_key: Bytes::from(pubkey_32.to_vec()),
             btc_address_byte: U256::from(btc_address_byte),
         })
+    }
+
+    async fn check_btc_funds_available(&self) -> Option<U256> {
+        use crate::signer::BtcAddressType;
+        const DUST_THRESHOLD: u64 = 546;
+
+        let fee_rate = self.get_fee_rate().await;
+        let per_input_vsize = match self.signer.address_type() {
+            BtcAddressType::P2TR => P2TR_INPUT_VSIZE,
+            _ => P2WPKH_INPUT_VSIZE,
+        };
+        let tss_value = DUST_THRESHOLD;
+
+        // Initial estimate: 1 input
+        let initial_fee = (BASE_VSIZE + per_input_vsize) * fee_rate;
+        let min_required = initial_fee + tss_value + DUST_THRESHOLD;
+
+        match self.utxo_provider.get_utxos(min_required).await {
+            Ok(utxos) => {
+                // Re-estimate with actual input count
+                let num_inputs = utxos.len() as u64;
+                let actual_fee = (BASE_VSIZE + num_inputs * per_input_vsize) * fee_rate;
+                let actual_min = actual_fee + tss_value + DUST_THRESHOLD;
+                let total: u64 = utxos.iter().map(|u| u.value).sum();
+
+                if total >= actual_min {
+                    Some(U256::zero())
+                } else {
+                    Some(U256::from(actual_min.saturating_sub(total)))
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "BTC balance check failed: could not fetch UTXOs");
+                Some(U256::from(min_required))
+            }
+        }
     }
 }
 
