@@ -4,6 +4,7 @@ use tracing::{error, info, trace, warn};
 pub use self::{fallback::*, provider::*, retrying::*, trait_builder::*, tx_rewrite_middleware::*};
 pub use error::decode_revert_reason;
 
+pub mod btc_tx_status;
 mod error;
 mod fallback;
 mod provider;

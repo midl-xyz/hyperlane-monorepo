@@ -15,13 +15,14 @@ use hyperlane_core::{
 };
 
 use super::utils::{
-    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+    build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
+    get_finalized_block_number,
 };
-use crate::config::MidlFinalityConf;
 use crate::interfaces::i_interchain_gas_paymaster::{
     GasPaymentFilter, IInterchainGasPaymaster as EthereumInterchainGasPaymasterInternal,
     IINTERCHAINGASPAYMASTER_ABI,
 };
+use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::{BuildableWithProvider, ConnectionConf, EthereumProvider, EthereumReorgPeriod};
 
 impl<M> Display for EthereumInterchainGasPaymasterInternal<M>
@@ -36,7 +37,6 @@ where
 pub struct InterchainGasPaymasterIndexerBuilder {
     pub mailbox_address: H160,
     pub reorg_period: EthereumReorgPeriod,
-    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -47,19 +47,22 @@ impl BuildableWithProvider for InterchainGasPaymasterIndexerBuilder {
     async fn build_with_provider<M: Middleware + 'static>(
         &self,
         provider: M,
-        _conn: &ConnectionConf,
+        conn: &ConnectionConf,
         locator: &ContractLocator,
     ) -> Self::Output {
+        let btc_finality = conn
+            .finality
+            .as_ref()
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
         Box::new(EthereumInterchainGasPaymasterIndexer::new(
             Arc::new(provider),
             locator,
             self.reorg_period,
-            self.finality.clone(),
+            btc_finality,
         ))
     }
 }
 
-#[derive(Debug)]
 /// Struct that retrieves event data for an Ethereum InterchainGasPaymaster
 pub struct EthereumInterchainGasPaymasterIndexer<M>
 where
@@ -68,7 +71,16 @@ where
     contract: Arc<EthereumInterchainGasPaymasterInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    finality: Option<MidlFinalityConf>,
+    btc_finality: Option<(BtcTxStatusClient, u64)>,
+}
+
+impl<M: Middleware> std::fmt::Debug for EthereumInterchainGasPaymasterIndexer<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthereumInterchainGasPaymasterIndexer")
+            .field("reorg_period", &self.reorg_period)
+            .field("btc_finality", &self.btc_finality)
+            .finish()
+    }
 }
 
 impl<M> EthereumInterchainGasPaymasterIndexer<M>
@@ -80,7 +92,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        finality: Option<MidlFinalityConf>,
+        btc_finality: Option<(BtcTxStatusClient, u64)>,
     ) -> Self {
         Self {
             contract: Arc::new(EthereumInterchainGasPaymasterInternal::new(
@@ -89,7 +101,7 @@ where
             )),
             provider,
             reorg_period,
-            finality,
+            btc_finality,
         }
     }
 }
@@ -131,8 +143,14 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some(conf) = &self.finality {
-            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        if let Some((btc_client, confirmations)) = &self.btc_finality {
+            return get_event_based_finalized_block::<M, GasPaymentFilter>(
+                self.provider.clone(),
+                self.contract.address(),
+                btc_client,
+                *confirmations,
+            )
+            .await;
         }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }

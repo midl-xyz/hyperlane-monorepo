@@ -5,13 +5,15 @@ use ethers::{
     providers::Middleware,
     types::{H160 as EthersH160, H256 as EthersH256},
 };
-use ethers_contract::{Contract, ContractError, EthEvent, LogMeta as EthersLogMeta};
-use ethers_core::{abi::Abi, types::U256};
+use ethers_contract::{ContractError, EthEvent, LogMeta as EthersLogMeta};
 use hyperlane_core::{ChainCommunicationError, ChainResult, LogMeta, H512};
-use once_cell::sync::Lazy;
-use serde_json::from_str;
+use tracing::debug;
 
-use crate::{config::MidlFinalityConf, EthereumReorgPeriod};
+use crate::{
+    config::{MidlExecutionConf, MidlFinalityConf},
+    rpc_clients::btc_tx_status::BtcTxStatusClient,
+    EthereumReorgPeriod,
+};
 
 pub async fn fetch_raw_logs_and_meta<T: EthEvent, M>(
     tx_hash: H512,
@@ -80,34 +82,77 @@ where
     Ok(number)
 }
 
-static EXECUTOR_ABI: Lazy<Abi> = Lazy::new(|| {
-    from_str(
-        r#"[{"inputs":[],"name":"lastCommittedMidlBlock","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]"#,
-    )
-    .expect("executor ABI")
-});
-
-pub async fn get_midl_finalized_block_number<M>(
-    provider: Arc<M>,
+/// Build a `(BtcTxStatusClient, btc_confirmations)` pair from the finality
+/// and execution configs.  Returns `None` when no mempool URL is available.
+pub fn build_btc_finality(
     finality: &MidlFinalityConf,
+    execution: Option<&MidlExecutionConf>,
+) -> Option<(BtcTxStatusClient, u64)> {
+    let mempool_url = execution.and_then(|e| e.mempool_url.clone())?;
+    let use_electrs_api = execution.and_then(|e| e.use_electrs_api).unwrap_or(false);
+    Some((
+        BtcTxStatusClient::new(mempool_url, use_electrs_api),
+        finality.btc_confirmations,
+    ))
+}
+
+/// Determine the finalized block by checking BTC confirmations on the
+/// indexer's own events.
+///
+/// 1. `eth_getLogs` for event type `E` on `contract_address` (full range)
+/// 2. Walk backwards from the latest event
+/// 3. For each event, get the transaction's `btcTxHash`, check BTC confirmations
+/// 4. Return the block number of the first event with >= required confirmations
+/// 5. If no events or none confirmed, return 0
+pub async fn get_event_based_finalized_block<M, E>(
+    provider: Arc<M>,
+    contract_address: EthersH160,
+    btc_client: &BtcTxStatusClient,
+    btc_confirmations: u64,
 ) -> ChainResult<u32>
 where
     M: Middleware + 'static,
+    E: EthEvent,
 {
-    let contract: Contract<M> = Contract::new(
-        finality.executor_address,
-        EXECUTOR_ABI.clone(),
-        provider.clone(),
-    );
-    let last_committed: U256 = contract
-        .method::<_, U256>("lastCommittedMidlBlock", ())
-        .map_err(ChainCommunicationError::from_other)?
-        .call()
+    let filter = ethers::types::Filter::new()
+        .address(contract_address)
+        .topic0(E::signature());
+
+    let logs = provider
+        .get_logs(&filter)
         .await
         .map_err(ChainCommunicationError::from_other)?;
 
-    let confirmations = finality.btc_confirmations.saturating_sub(1);
-    let finalized = last_committed.saturating_sub(U256::from(confirmations));
-    u32::try_from(finalized)
-        .map_err(|_| ChainCommunicationError::CustomError("finalized block overflow".into()))
+    for log in logs.iter().rev() {
+        let Some(block_number) = log.block_number else {
+            continue;
+        };
+        let Some(tx_hash) = log.transaction_hash else {
+            continue;
+        };
+
+        let tx = provider
+            .get_transaction(tx_hash)
+            .await
+            .map_err(ChainCommunicationError::from_other)?;
+        let Some(tx) = tx else { continue };
+        let Some(btc_hash) = tx.btc_tx_hash else {
+            continue;
+        };
+
+        let btc_tx_id = format!("{:x}", btc_hash);
+        let confirmations = btc_client.get_tx_confirmations(&btc_tx_id).await?;
+
+        if confirmations >= btc_confirmations {
+            debug!(
+                block = block_number.as_u32(),
+                btc_tx = %btc_tx_id,
+                confirmations,
+                "Event-based finality: found confirmed BTC tx"
+            );
+            return Ok(block_number.as_u32());
+        }
+    }
+
+    Ok(0)
 }

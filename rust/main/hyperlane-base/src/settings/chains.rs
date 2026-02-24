@@ -514,10 +514,7 @@ impl ChainConf {
                     conf,
                     &locator,
                     metrics,
-                    h_midl::SequenceIndexerBuilder {
-                        reorg_period,
-                        finality: conf.finality.clone(),
-                    },
+                    h_midl::SequenceIndexerBuilder { reorg_period },
                 )
                 .await
             }
@@ -610,10 +607,7 @@ impl ChainConf {
                     conf,
                     &locator,
                     metrics,
-                    h_midl::DeliveryIndexerBuilder {
-                        reorg_period,
-                        finality: conf.finality.clone(),
-                    },
+                    h_midl::DeliveryIndexerBuilder { reorg_period },
                 )
                 .await
             }
@@ -787,7 +781,6 @@ impl ChainConf {
                     h_midl::InterchainGasPaymasterIndexerBuilder {
                         mailbox_address: self.addresses.mailbox.into(),
                         reorg_period,
-                        finality: conf.finality.clone(),
                     },
                 )
                 .await
@@ -870,10 +863,7 @@ impl ChainConf {
                     conf,
                     &locator,
                     metrics,
-                    h_midl::MerkleTreeHookIndexerBuilder {
-                        reorg_period,
-                        finality: conf.finality.clone(),
-                    },
+                    h_midl::MerkleTreeHookIndexerBuilder { reorg_period },
                 )
                 .await
             }

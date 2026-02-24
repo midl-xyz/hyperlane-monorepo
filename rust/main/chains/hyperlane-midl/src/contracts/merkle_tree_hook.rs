@@ -16,15 +16,16 @@ use hyperlane_core::{
     MerkleTreeHook, MerkleTreeInsertion, ReorgPeriod, SequenceAwareIndexer, H256, H512,
 };
 
-use crate::config::MidlFinalityConf;
 use crate::interfaces::merkle_tree_hook::{
     InsertedIntoTreeFilter, MerkleTreeHook as MerkleTreeHookContract, Tree,
 };
+use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::tx::call_with_reorg_period;
 use crate::{BuildableWithProvider, ConnectionConf, EthereumProvider, EthereumReorgPeriod};
 
 use super::utils::{
-    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+    build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
+    get_finalized_block_number,
 };
 
 // We don't need the reverse of this impl, so it's ok to disable the clippy lint
@@ -63,7 +64,6 @@ impl BuildableWithProvider for MerkleTreeHookBuilder {
 
 pub struct MerkleTreeHookIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
-    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -74,19 +74,22 @@ impl BuildableWithProvider for MerkleTreeHookIndexerBuilder {
     async fn build_with_provider<M: Middleware + 'static>(
         &self,
         provider: M,
-        _conn: &ConnectionConf,
+        conn: &ConnectionConf,
         locator: &ContractLocator,
     ) -> Self::Output {
+        let btc_finality = conn
+            .finality
+            .as_ref()
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
         Box::new(EthereumMerkleTreeHookIndexer::new(
             Arc::new(provider),
             locator,
             self.reorg_period,
-            self.finality.clone(),
+            btc_finality,
         ))
     }
 }
 
-#[derive(Debug)]
 /// Struct that retrieves event data for an Ethereum MerkleTreeHook
 pub struct EthereumMerkleTreeHookIndexer<M>
 where
@@ -95,7 +98,16 @@ where
     contract: Arc<MerkleTreeHookContract<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    finality: Option<MidlFinalityConf>,
+    btc_finality: Option<(BtcTxStatusClient, u64)>,
+}
+
+impl<M: Middleware> std::fmt::Debug for EthereumMerkleTreeHookIndexer<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthereumMerkleTreeHookIndexer")
+            .field("reorg_period", &self.reorg_period)
+            .field("btc_finality", &self.btc_finality)
+            .finish()
+    }
 }
 
 impl<M> EthereumMerkleTreeHookIndexer<M>
@@ -107,7 +119,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        finality: Option<MidlFinalityConf>,
+        btc_finality: Option<(BtcTxStatusClient, u64)>,
     ) -> Self {
         Self {
             contract: Arc::new(MerkleTreeHookContract::new(
@@ -116,7 +128,7 @@ where
             )),
             provider,
             reorg_period,
-            finality,
+            btc_finality,
         }
     }
 }
@@ -154,8 +166,14 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some(conf) = &self.finality {
-            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        if let Some((btc_client, confirmations)) = &self.btc_finality {
+            return get_event_based_finalized_block::<M, InsertedIntoTreeFilter>(
+                self.provider.clone(),
+                self.contract.address(),
+                btc_client,
+                *confirmations,
+            )
+            .await;
         }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }

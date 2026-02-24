@@ -1,5 +1,5 @@
 use ethers::providers::Middleware;
-use ethers_core::types::{BlockId, BlockNumber, Bytes, H160};
+use ethers_core::types::{BlockId, BlockNumber, Bytes};
 use url::Url;
 
 use hyperlane_core::{
@@ -150,7 +150,6 @@ pub struct MidlExecutionConf {
 /// Configuration describing how to translate BTC confirmations into finalized blocks.
 #[derive(Clone, Debug)]
 pub struct MidlFinalityConf {
-    pub executor_address: H160,
     pub btc_confirmations: u64,
 }
 

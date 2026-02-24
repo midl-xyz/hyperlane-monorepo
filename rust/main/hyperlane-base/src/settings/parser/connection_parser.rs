@@ -13,7 +13,7 @@ use hyperlane_midl as h_midl;
 
 use hyperlane_core::config::{ConfigErrResultExt, OpSubmissionConfig};
 use hyperlane_core::utils::hex_or_base58_or_bech32_to_h256;
-use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken, H160};
+use hyperlane_core::{config::ConfigParsingError, HyperlaneDomainProtocol, NativeToken};
 
 use hyperlane_starknet as h_starknet;
 
@@ -702,17 +702,6 @@ fn parse_midl_finality_conf(
         .take_err(err, || (&chain.cwp).add("midlFinality"))
         .flatten()?;
 
-    let executor_address = parser
-        .chain(err)
-        .get_key("executorAddress")
-        .parse_string()
-        .end()
-        .and_then(|value| {
-            H160::from_str(value)
-                .map_err(|e| err.push((&parser.cwp).add("executorAddress"), eyre!(e)))
-                .ok()
-        })?;
-
     let btc_confirmations = parser
         .chain(err)
         .get_opt_key("btcConfirmations")
@@ -721,10 +710,7 @@ fn parse_midl_finality_conf(
         .unwrap_or(6)
         .max(1);
 
-    Some(h_midl::MidlFinalityConf {
-        executor_address: executor_address.into(),
-        btc_confirmations,
-    })
+    Some(h_midl::MidlFinalityConf { btc_confirmations })
 }
 
 pub fn build_radix_connection_conf(

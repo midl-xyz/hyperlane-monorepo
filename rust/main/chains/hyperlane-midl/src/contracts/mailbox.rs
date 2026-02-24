@@ -26,11 +26,11 @@ use hyperlane_core::{
     ReorgPeriod, SequenceAwareIndexer, TxCostEstimate, TxOutcome, H160, H256, H512, U256,
 };
 
-use crate::config::MidlFinalityConf;
 use crate::error::HyperlaneEthereumError;
 use crate::interfaces::arbitrum_node_interface::ArbitrumNodeInterface;
 use crate::interfaces::i_mailbox::{IMailbox as EthereumMailboxInternal, IMAILBOX_ABI};
 use crate::interfaces::mailbox::DispatchFilter;
+use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::tx::{
     call_with_reorg_period, estimate_eip1559_fees, fill_tx_gas_params, report_tx, Eip1559Fee,
 };
@@ -41,7 +41,8 @@ use crate::{
 
 use super::multicall::{self, build_multicall, BatchCache};
 use super::utils::{
-    fetch_raw_logs_and_meta, get_finalized_block_number, get_midl_finalized_block_number,
+    build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
+    get_finalized_block_number,
 };
 
 impl<M> std::fmt::Display for EthereumMailboxInternal<M>
@@ -55,7 +56,6 @@ where
 
 pub struct SequenceIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
-    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -66,21 +66,24 @@ impl BuildableWithProvider for SequenceIndexerBuilder {
     async fn build_with_provider<M: Middleware + 'static>(
         &self,
         provider: M,
-        _conn: &ConnectionConf,
+        conn: &ConnectionConf,
         locator: &ContractLocator,
     ) -> Self::Output {
+        let btc_finality = conn
+            .finality
+            .as_ref()
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
         Box::new(EthereumMailboxIndexer::new(
             Arc::new(provider),
             locator,
             self.reorg_period,
-            self.finality.clone(),
+            btc_finality,
         ))
     }
 }
 
 pub struct DeliveryIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
-    pub finality: Option<MidlFinalityConf>,
 }
 
 #[async_trait]
@@ -91,19 +94,22 @@ impl BuildableWithProvider for DeliveryIndexerBuilder {
     async fn build_with_provider<M: Middleware + 'static>(
         &self,
         provider: M,
-        _conn: &ConnectionConf,
+        conn: &ConnectionConf,
         locator: &ContractLocator,
     ) -> Self::Output {
+        let btc_finality = conn
+            .finality
+            .as_ref()
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
         Box::new(EthereumMailboxIndexer::new(
             Arc::new(provider),
             locator,
             self.reorg_period,
-            self.finality.clone(),
+            btc_finality,
         ))
     }
 }
 
-#[derive(Debug, Clone)]
 /// Struct that retrieves event data for an Ethereum mailbox
 pub struct EthereumMailboxIndexer<M>
 where
@@ -112,7 +118,16 @@ where
     contract: Arc<EthereumMailboxInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    finality: Option<MidlFinalityConf>,
+    btc_finality: Option<(BtcTxStatusClient, u64)>,
+}
+
+impl<M: Middleware> std::fmt::Debug for EthereumMailboxIndexer<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthereumMailboxIndexer")
+            .field("reorg_period", &self.reorg_period)
+            .field("btc_finality", &self.btc_finality)
+            .finish()
+    }
 }
 
 impl<M> EthereumMailboxIndexer<M>
@@ -124,7 +139,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        finality: Option<MidlFinalityConf>,
+        btc_finality: Option<(BtcTxStatusClient, u64)>,
     ) -> Self {
         let contract = Arc::new(EthereumMailboxInternal::new(
             locator.address,
@@ -134,13 +149,19 @@ where
             contract,
             provider,
             reorg_period,
-            finality,
+            btc_finality,
         }
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some(conf) = &self.finality {
-            return get_midl_finalized_block_number(self.provider.clone(), conf).await;
+        if let Some((btc_client, confirmations)) = &self.btc_finality {
+            return get_event_based_finalized_block::<M, DispatchFilter>(
+                self.provider.clone(),
+                self.contract.address(),
+                btc_client,
+                *confirmations,
+            )
+            .await;
         }
         get_finalized_block_number(&self.provider, &self.reorg_period).await
     }
