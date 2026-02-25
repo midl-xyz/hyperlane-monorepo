@@ -510,11 +510,15 @@ impl ChainConf {
             ChainConnectionConf::Midl(conf) => {
                 let reorg_period =
                     h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                let deploy_block = self.index.from.max(0) as u32;
                 self.build_midl(
                     conf,
                     &locator,
                     metrics,
-                    h_midl::SequenceIndexerBuilder { reorg_period },
+                    h_midl::SequenceIndexerBuilder {
+                        reorg_period,
+                        deploy_block,
+                    },
                 )
                 .await
             }
@@ -603,11 +607,15 @@ impl ChainConf {
             ChainConnectionConf::Midl(conf) => {
                 let reorg_period =
                     h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                let deploy_block = self.index.from.max(0) as u32;
                 self.build_midl(
                     conf,
                     &locator,
                     metrics,
-                    h_midl::DeliveryIndexerBuilder { reorg_period },
+                    h_midl::DeliveryIndexerBuilder {
+                        reorg_period,
+                        deploy_block,
+                    },
                 )
                 .await
             }
@@ -774,6 +782,7 @@ impl ChainConf {
             ChainConnectionConf::Midl(conf) => {
                 let reorg_period =
                     h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                let deploy_block = self.index.from.max(0) as u32;
                 self.build_midl(
                     conf,
                     &locator,
@@ -781,6 +790,7 @@ impl ChainConf {
                     h_midl::InterchainGasPaymasterIndexerBuilder {
                         mailbox_address: self.addresses.mailbox.into(),
                         reorg_period,
+                        deploy_block,
                     },
                 )
                 .await
@@ -859,11 +869,15 @@ impl ChainConf {
             ChainConnectionConf::Midl(conf) => {
                 let reorg_period =
                     h_midl::EthereumReorgPeriod::try_from(&self.reorg_period).context(ctx)?;
+                let deploy_block = self.index.from.max(0) as u32;
                 self.build_midl(
                     conf,
                     &locator,
                     metrics,
-                    h_midl::MerkleTreeHookIndexerBuilder { reorg_period },
+                    h_midl::MerkleTreeHookIndexerBuilder {
+                        reorg_period,
+                        deploy_block,
+                    },
                 )
                 .await
             }

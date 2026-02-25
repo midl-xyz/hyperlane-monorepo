@@ -19,13 +19,12 @@ use hyperlane_core::{
 use crate::interfaces::merkle_tree_hook::{
     InsertedIntoTreeFilter, MerkleTreeHook as MerkleTreeHookContract, Tree,
 };
-use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::tx::call_with_reorg_period;
 use crate::{BuildableWithProvider, ConnectionConf, EthereumProvider, EthereumReorgPeriod};
 
 use super::utils::{
     build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
-    get_finalized_block_number,
+    get_finalized_block_number, BtcFinalityState,
 };
 
 // We don't need the reverse of this impl, so it's ok to disable the clippy lint
@@ -64,6 +63,7 @@ impl BuildableWithProvider for MerkleTreeHookBuilder {
 
 pub struct MerkleTreeHookIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub deploy_block: u32,
 }
 
 #[async_trait]
@@ -80,7 +80,7 @@ impl BuildableWithProvider for MerkleTreeHookIndexerBuilder {
         let btc_finality = conn
             .finality
             .as_ref()
-            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref(), self.deploy_block));
         Box::new(EthereumMerkleTreeHookIndexer::new(
             Arc::new(provider),
             locator,
@@ -98,7 +98,7 @@ where
     contract: Arc<MerkleTreeHookContract<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    btc_finality: Option<(BtcTxStatusClient, u64)>,
+    btc_finality: Option<BtcFinalityState>,
 }
 
 impl<M: Middleware> std::fmt::Debug for EthereumMerkleTreeHookIndexer<M> {
@@ -119,7 +119,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        btc_finality: Option<(BtcTxStatusClient, u64)>,
+        btc_finality: Option<BtcFinalityState>,
     ) -> Self {
         Self {
             contract: Arc::new(MerkleTreeHookContract::new(
@@ -166,12 +166,11 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some((btc_client, confirmations)) = &self.btc_finality {
+        if let Some(btc_finality) = &self.btc_finality {
             return get_event_based_finalized_block::<M, InsertedIntoTreeFilter>(
                 self.provider.clone(),
                 self.contract.address(),
-                btc_client,
-                *confirmations,
+                btc_finality,
             )
             .await;
         }
@@ -214,6 +213,9 @@ where
     // `SequenceAwareIndexer` and `Indexer`.
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
         let tip = self.get_finalized_block_number().await?;
+        if tip == 0 {
+            return Ok((Some(0), 0));
+        }
         let sequence = self.contract.count().block(u64::from(tip)).call().await?;
         Ok((Some(sequence), tip))
     }

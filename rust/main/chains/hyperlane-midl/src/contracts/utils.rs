@@ -82,76 +82,131 @@ where
     Ok(number)
 }
 
-/// Build a `(BtcTxStatusClient, btc_confirmations)` pair from the finality
-/// and execution configs.  Returns `None` when no mempool URL is available.
+/// BTC finality configuration resolved from the chain config, bundling the
+/// HTTP client, required confirmations, and the earliest block to scan.
+pub struct BtcFinalityState {
+    pub btc_client: BtcTxStatusClient,
+    pub btc_confirmations: u64,
+    /// Earliest MIDL block that can contain contract events (from `index.from`).
+    pub deploy_block: u32,
+}
+
+impl std::fmt::Debug for BtcFinalityState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BtcFinalityState")
+            .field("btc_client", &self.btc_client)
+            .field("btc_confirmations", &self.btc_confirmations)
+            .field("deploy_block", &self.deploy_block)
+            .finish()
+    }
+}
+
+/// Build a [`BtcFinalityState`] from the finality and execution configs.
+/// Returns `None` when no mempool URL is available.
 pub fn build_btc_finality(
     finality: &MidlFinalityConf,
     execution: Option<&MidlExecutionConf>,
-) -> Option<(BtcTxStatusClient, u64)> {
+    deploy_block: u32,
+) -> Option<BtcFinalityState> {
     let mempool_url = execution.and_then(|e| e.mempool_url.clone())?;
-    let use_electrs_api = execution.and_then(|e| e.use_electrs_api).unwrap_or(false);
-    Some((
-        BtcTxStatusClient::new(mempool_url, use_electrs_api),
-        finality.btc_confirmations,
-    ))
+    Some(BtcFinalityState {
+        btc_client: BtcTxStatusClient::new(mempool_url),
+        btc_confirmations: finality.btc_confirmations,
+        deploy_block,
+    })
 }
+
+/// Number of MIDL blocks to scan per `eth_getLogs` chunk when walking
+/// backwards from the tip looking for BTC-confirmed events.
+const BTC_FINALITY_CHUNK_SIZE: u32 = 1000;
 
 /// Determine the finalized block by checking BTC confirmations on the
 /// indexer's own events.
 ///
-/// 1. `eth_getLogs` for event type `E` on `contract_address` (full range)
-/// 2. Walk backwards from the latest event
-/// 3. For each event, get the transaction's `btcTxHash`, check BTC confirmations
-/// 4. Return the block number of the first event with >= required confirmations
-/// 5. If no events or none confirmed, return 0
+/// Walks backwards from the chain tip in chunks, querying `eth_getLogs` for
+/// event type `E`.  For each event (newest first) it fetches the MIDL
+/// transaction's `btcTxHash` and checks BTC confirmations.  Returns the
+/// block number of the first event with >= required confirmations, or 0 if
+/// none is found.
 pub async fn get_event_based_finalized_block<M, E>(
     provider: Arc<M>,
     contract_address: EthersH160,
-    btc_client: &BtcTxStatusClient,
-    btc_confirmations: u64,
+    btc_finality: &BtcFinalityState,
 ) -> ChainResult<u32>
 where
     M: Middleware + 'static,
     E: EthEvent,
 {
-    let filter = ethers::types::Filter::new()
-        .address(contract_address)
-        .topic0(E::signature());
-
-    let logs = provider
-        .get_logs(&filter)
+    let tip = provider
+        .get_block_number()
         .await
-        .map_err(ChainCommunicationError::from_other)?;
+        .map_err(ChainCommunicationError::from_other)?
+        .as_u32();
 
-    for log in logs.iter().rev() {
-        let Some(block_number) = log.block_number else {
-            continue;
-        };
-        let Some(tx_hash) = log.transaction_hash else {
-            continue;
-        };
+    if tip == 0 {
+        return Ok(0);
+    }
 
-        let tx = provider
-            .get_transaction(tx_hash)
+    let min_block = btc_finality.deploy_block;
+    let mut to_block = tip;
+
+    loop {
+        let from_block = to_block
+            .saturating_sub(BTC_FINALITY_CHUNK_SIZE - 1)
+            .max(min_block);
+
+        let filter = ethers::types::Filter::new()
+            .address(contract_address)
+            .topic0(E::signature())
+            .from_block(from_block)
+            .to_block(to_block);
+
+        let logs = provider
+            .get_logs(&filter)
             .await
             .map_err(ChainCommunicationError::from_other)?;
-        let Some(tx) = tx else { continue };
-        let Some(btc_hash) = tx.btc_tx_hash else {
-            continue;
-        };
 
-        let btc_tx_id = format!("{:x}", btc_hash);
-        let confirmations = btc_client.get_tx_confirmations(&btc_tx_id).await?;
+        // Walk newest-first within this chunk.
+        for log in logs.iter().rev() {
+            let Some(block_number) = log.block_number else {
+                continue;
+            };
+            let Some(tx_hash) = log.transaction_hash else {
+                continue;
+            };
 
-        if confirmations >= btc_confirmations {
-            debug!(
-                block = block_number.as_u32(),
-                btc_tx = %btc_tx_id,
-                confirmations,
-                "Event-based finality: found confirmed BTC tx"
-            );
-            return Ok(block_number.as_u32());
+            let tx = provider
+                .get_transaction(tx_hash)
+                .await
+                .map_err(ChainCommunicationError::from_other)?;
+            let Some(tx) = tx else { continue };
+            let Some(btc_hash) = tx.btc_tx_hash else {
+                continue;
+            };
+
+            let btc_tx_id = format!("{:x}", btc_hash);
+            let confirmations = btc_finality
+                .btc_client
+                .get_tx_confirmations(&btc_tx_id)
+                .await?;
+
+            if confirmations >= btc_finality.btc_confirmations {
+                debug!(
+                    block = block_number.as_u32(),
+                    btc_tx = %btc_tx_id,
+                    confirmations,
+                    "Event-based finality: found confirmed BTC tx"
+                );
+                return Ok(block_number.as_u32());
+            }
         }
+
+        // Reached the deploy block without finding a confirmed event.
+        if from_block <= min_block {
+            break;
+        }
+
+        to_block = from_block.saturating_sub(1);
     }
 
     Ok(0)

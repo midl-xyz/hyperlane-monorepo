@@ -30,7 +30,6 @@ use crate::error::HyperlaneEthereumError;
 use crate::interfaces::arbitrum_node_interface::ArbitrumNodeInterface;
 use crate::interfaces::i_mailbox::{IMailbox as EthereumMailboxInternal, IMAILBOX_ABI};
 use crate::interfaces::mailbox::DispatchFilter;
-use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::tx::{
     call_with_reorg_period, estimate_eip1559_fees, fill_tx_gas_params, report_tx, Eip1559Fee,
 };
@@ -42,7 +41,7 @@ use crate::{
 use super::multicall::{self, build_multicall, BatchCache};
 use super::utils::{
     build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
-    get_finalized_block_number,
+    get_finalized_block_number, BtcFinalityState,
 };
 
 impl<M> std::fmt::Display for EthereumMailboxInternal<M>
@@ -56,6 +55,7 @@ where
 
 pub struct SequenceIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub deploy_block: u32,
 }
 
 #[async_trait]
@@ -72,7 +72,7 @@ impl BuildableWithProvider for SequenceIndexerBuilder {
         let btc_finality = conn
             .finality
             .as_ref()
-            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref(), self.deploy_block));
         Box::new(EthereumMailboxIndexer::new(
             Arc::new(provider),
             locator,
@@ -84,6 +84,7 @@ impl BuildableWithProvider for SequenceIndexerBuilder {
 
 pub struct DeliveryIndexerBuilder {
     pub reorg_period: EthereumReorgPeriod,
+    pub deploy_block: u32,
 }
 
 #[async_trait]
@@ -100,7 +101,7 @@ impl BuildableWithProvider for DeliveryIndexerBuilder {
         let btc_finality = conn
             .finality
             .as_ref()
-            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref(), self.deploy_block));
         Box::new(EthereumMailboxIndexer::new(
             Arc::new(provider),
             locator,
@@ -118,7 +119,7 @@ where
     contract: Arc<EthereumMailboxInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    btc_finality: Option<(BtcTxStatusClient, u64)>,
+    btc_finality: Option<BtcFinalityState>,
 }
 
 impl<M: Middleware> std::fmt::Debug for EthereumMailboxIndexer<M> {
@@ -139,7 +140,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        btc_finality: Option<(BtcTxStatusClient, u64)>,
+        btc_finality: Option<BtcFinalityState>,
     ) -> Self {
         let contract = Arc::new(EthereumMailboxInternal::new(
             locator.address,
@@ -154,12 +155,11 @@ where
     }
 
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some((btc_client, confirmations)) = &self.btc_finality {
+        if let Some(btc_finality) = &self.btc_finality {
             return get_event_based_finalized_block::<M, DispatchFilter>(
                 self.provider.clone(),
                 self.contract.address(),
-                btc_client,
-                *confirmations,
+                btc_finality,
             )
             .await;
         }
@@ -234,6 +234,9 @@ where
 {
     async fn latest_sequence_count_and_tip(&self) -> ChainResult<(Option<u32>, u32)> {
         let tip = Indexer::<HyperlaneMessage>::get_finalized_block_number(self).await?;
+        if tip == 0 {
+            return Ok((Some(0), 0));
+        }
         let sequence = self.contract.nonce().block(u64::from(tip)).call().await?;
         Ok((Some(sequence), tip))
     }

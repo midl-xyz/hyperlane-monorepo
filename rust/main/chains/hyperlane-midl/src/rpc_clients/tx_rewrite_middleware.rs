@@ -389,10 +389,13 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
             P2WPKH_INPUT_VSIZE
         };
 
-        // Dust threshold (546 satoshis for standard outputs)
-        const DUST_THRESHOLD: u64 = 546;
+        // Dust threshold for outputs. The minimum depends on the node's
+        // minrelaytxfee setting — 546 sats is standard for P2PKH at 1 sat/vB
+        // relay fee, but P2TR outputs on nodes with higher relay fees need more
+        // (e.g. 1387 sats at ~5 sat/kB). Use 1500 sats as a safe default.
+        const DUST_THRESHOLD: u64 = 1500;
 
-        // TSS funding value - minimum dust threshold for the TSS output
+        // TSS funding value - must be above the dust threshold
         let tss_value = DUST_THRESHOLD;
 
         // Initial fee estimate assuming 1 input
@@ -604,7 +607,7 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
 
     async fn check_btc_funds_available(&self) -> Option<U256> {
         use crate::signer::BtcAddressType;
-        const DUST_THRESHOLD: u64 = 546;
+        const DUST_THRESHOLD: u64 = 1500;
 
         let fee_rate = self.get_fee_rate().await;
         let per_input_vsize = match self.signer.address_type() {

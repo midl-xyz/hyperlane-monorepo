@@ -16,13 +16,12 @@ use hyperlane_core::{
 
 use super::utils::{
     build_btc_finality, fetch_raw_logs_and_meta, get_event_based_finalized_block,
-    get_finalized_block_number,
+    get_finalized_block_number, BtcFinalityState,
 };
 use crate::interfaces::i_interchain_gas_paymaster::{
     GasPaymentFilter, IInterchainGasPaymaster as EthereumInterchainGasPaymasterInternal,
     IINTERCHAINGASPAYMASTER_ABI,
 };
-use crate::rpc_clients::btc_tx_status::BtcTxStatusClient;
 use crate::{BuildableWithProvider, ConnectionConf, EthereumProvider, EthereumReorgPeriod};
 
 impl<M> Display for EthereumInterchainGasPaymasterInternal<M>
@@ -37,6 +36,7 @@ where
 pub struct InterchainGasPaymasterIndexerBuilder {
     pub mailbox_address: H160,
     pub reorg_period: EthereumReorgPeriod,
+    pub deploy_block: u32,
 }
 
 #[async_trait]
@@ -53,7 +53,7 @@ impl BuildableWithProvider for InterchainGasPaymasterIndexerBuilder {
         let btc_finality = conn
             .finality
             .as_ref()
-            .and_then(|f| build_btc_finality(f, conn.execution.as_ref()));
+            .and_then(|f| build_btc_finality(f, conn.execution.as_ref(), self.deploy_block));
         Box::new(EthereumInterchainGasPaymasterIndexer::new(
             Arc::new(provider),
             locator,
@@ -71,7 +71,7 @@ where
     contract: Arc<EthereumInterchainGasPaymasterInternal<M>>,
     provider: Arc<M>,
     reorg_period: EthereumReorgPeriod,
-    btc_finality: Option<(BtcTxStatusClient, u64)>,
+    btc_finality: Option<BtcFinalityState>,
 }
 
 impl<M: Middleware> std::fmt::Debug for EthereumInterchainGasPaymasterIndexer<M> {
@@ -92,7 +92,7 @@ where
         provider: Arc<M>,
         locator: &ContractLocator,
         reorg_period: EthereumReorgPeriod,
-        btc_finality: Option<(BtcTxStatusClient, u64)>,
+        btc_finality: Option<BtcFinalityState>,
     ) -> Self {
         Self {
             contract: Arc::new(EthereumInterchainGasPaymasterInternal::new(
@@ -143,12 +143,11 @@ where
 
     #[allow(clippy::blocks_in_conditions)] // TODO: `rustc` 1.80.1 clippy issue
     async fn get_finalized_block_number(&self) -> ChainResult<u32> {
-        if let Some((btc_client, confirmations)) = &self.btc_finality {
+        if let Some(btc_finality) = &self.btc_finality {
             return get_event_based_finalized_block::<M, GasPaymentFilter>(
                 self.provider.clone(),
                 self.contract.address(),
-                btc_client,
-                *confirmations,
+                btc_finality,
             )
             .await;
         }
