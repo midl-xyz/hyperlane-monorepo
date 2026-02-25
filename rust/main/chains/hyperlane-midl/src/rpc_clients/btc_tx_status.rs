@@ -16,40 +16,31 @@ pub struct BtcTxStatus {
     pub block_height: Option<u64>,
 }
 
-/// Client for querying BTC transaction confirmation status via mempool.space
-/// or electrs compatible APIs.
+/// Client for querying BTC transaction confirmation status via mempool.space API.
 pub struct BtcTxStatusClient {
     client: Client,
     base_url: String,
-    /// "/api" for mempool.space, "" for electrs
-    api_prefix: String,
 }
 
 impl std::fmt::Debug for BtcTxStatusClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BtcTxStatusClient")
             .field("base_url", &self.base_url)
-            .field("api_prefix", &self.api_prefix)
             .finish()
     }
 }
 
 impl BtcTxStatusClient {
-    pub fn new(base_url: String, use_electrs_api: bool) -> Self {
+    pub fn new(base_url: String) -> Self {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_prefix: if use_electrs_api {
-                String::new()
-            } else {
-                "/api".to_string()
-            },
         }
     }
 
     /// Get the current BTC block tip height.
     pub async fn get_btc_tip_height(&self) -> Result<u64, ChainCommunicationError> {
-        let url = format!("{}{}/blocks/tip/height", self.base_url, self.api_prefix);
+        let url = format!("{}/api/blocks/tip/height", self.base_url);
 
         let response = self.client.get(&url).send().await.map_err(|e| {
             ChainCommunicationError::CustomError(format!("Failed to fetch BTC tip height: {}", e))
@@ -73,10 +64,7 @@ impl BtcTxStatusClient {
         &self,
         btc_tx_hash: &str,
     ) -> Result<Option<BtcTxStatus>, ChainCommunicationError> {
-        let url = format!(
-            "{}{}/tx/{}/status",
-            self.base_url, self.api_prefix, btc_tx_hash
-        );
+        let url = format!("{}/api/tx/{}/status", self.base_url, btc_tx_hash);
 
         debug!(url = %url, btc_tx_hash, "Checking BTC tx status");
 

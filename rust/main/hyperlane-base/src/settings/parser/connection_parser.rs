@@ -615,12 +615,6 @@ fn parse_midl_execution_conf(
         .end()
         .map(|s| s.to_owned());
 
-    let use_electrs_api = exec_parser
-        .chain(err)
-        .get_opt_key("useElectrsApi")
-        .parse_bool()
-        .end();
-
     let min_confirmations = exec_parser
         .chain(err)
         .get_opt_key("minConfirmations")
@@ -632,7 +626,6 @@ fn parse_midl_execution_conf(
         static_metadata,
         btc_fee_rate_sat_per_vbyte,
         mempool_url,
-        use_electrs_api,
         min_confirmations,
     })
 }

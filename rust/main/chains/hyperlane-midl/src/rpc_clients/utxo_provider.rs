@@ -30,25 +30,17 @@ pub struct MempoolUtxo {
 
 /// A UTXO provider that fetches UTXOs from a mempool.space-compatible API.
 ///
-/// This provider supports any API that implements the mempool.space UTXO endpoint:
-/// `GET /api/address/{address}/utxo`
-///
-/// Compatible services include:
-/// - mempool.space (public) - uses `/api` prefix
-/// - Self-hosted mempool backend - uses `/api` prefix
-/// - Electrs with HTTP API - no prefix (set `api_prefix` to empty string)
+/// Uses the mempool.space UTXO endpoint: `GET /api/address/{address}/utxo`
 pub struct MempoolUtxoProvider {
     client: Client,
     base_url: String,
     bitcoin_address: String,
     /// Minimum confirmations required for a UTXO to be considered spendable
     min_confirmations: u64,
-    /// API path prefix (e.g., "/api" for mempool.space, "" for electrs)
-    api_prefix: String,
 }
 
 impl MempoolUtxoProvider {
-    /// Create a new MempoolUtxoProvider for mempool.space-compatible APIs.
+    /// Create a new MempoolUtxoProvider.
     ///
     /// # Arguments
     /// * `base_url` - The base URL of the mempool API (e.g., "https://mempool.space")
@@ -60,33 +52,14 @@ impl MempoolUtxoProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             bitcoin_address,
             min_confirmations,
-            api_prefix: "/api".to_string(),
-        }
-    }
-
-    /// Create a new MempoolUtxoProvider for electrs HTTP API.
-    ///
-    /// Electrs uses the same response format but without the `/api` prefix.
-    ///
-    /// # Arguments
-    /// * `base_url` - The base URL of the electrs API (e.g., "http://localhost:3002")
-    /// * `bitcoin_address` - The Bitcoin address to fetch UTXOs for
-    /// * `min_confirmations` - Minimum confirmations required (default: 1)
-    pub fn new_electrs(base_url: String, bitcoin_address: String, min_confirmations: u64) -> Self {
-        Self {
-            client: Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            bitcoin_address,
-            min_confirmations,
-            api_prefix: String::new(),
         }
     }
 
     /// Fetch all UTXOs for the configured address.
     async fn fetch_utxos(&self) -> Result<Vec<MempoolUtxo>, ChainCommunicationError> {
         let url = format!(
-            "{}{}/address/{}/utxo",
-            self.base_url, self.api_prefix, self.bitcoin_address
+            "{}/api/address/{}/utxo",
+            self.base_url, self.bitcoin_address
         );
 
         debug!(url = %url, "Fetching UTXOs from mempool API");
@@ -113,7 +86,7 @@ impl MempoolUtxoProvider {
 
     /// Get the current block height from the mempool API.
     async fn get_block_height(&self) -> Result<u64, ChainCommunicationError> {
-        let url = format!("{}{}/blocks/tip/height", self.base_url, self.api_prefix);
+        let url = format!("{}/api/blocks/tip/height", self.base_url);
 
         let response = self.client.get(&url).send().await.map_err(|e| {
             ChainCommunicationError::CustomError(format!("Failed to fetch block height: {}", e))
@@ -157,7 +130,6 @@ impl std::fmt::Debug for MempoolUtxoProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MempoolUtxoProvider")
             .field("base_url", &self.base_url)
-            .field("api_prefix", &self.api_prefix)
             .field("bitcoin_address", &self.bitcoin_address)
             .field("min_confirmations", &self.min_confirmations)
             .finish()
