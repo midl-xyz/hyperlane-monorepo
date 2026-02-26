@@ -4211,6 +4211,7 @@ dependencies = [
 [[package]]
 name = "ethers"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "ethers-addressbook",
  "ethers-contract",
@@ -4224,6 +4225,7 @@ dependencies = [
 [[package]]
 name = "ethers-addressbook"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "ethers-core",
  "once_cell",
@@ -4234,6 +4236,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "ethers-contract-abigen",
  "ethers-contract-derive",
@@ -4251,6 +4254,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract-abigen"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "Inflector",
  "cfg-if",
@@ -4274,6 +4278,7 @@ dependencies = [
 [[package]]
 name = "ethers-contract-derive"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "ethers-contract-abigen",
  "ethers-core",
@@ -4287,6 +4292,7 @@ dependencies = [
 [[package]]
 name = "ethers-core"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -4316,6 +4322,7 @@ dependencies = [
 [[package]]
 name = "ethers-etherscan"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "ethers-core",
  "getrandom 0.2.15",
@@ -4331,6 +4338,7 @@ dependencies = [
 [[package]]
 name = "ethers-middleware"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "async-trait",
  "auto_impl 0.5.0",
@@ -4381,6 +4389,7 @@ dependencies = [
 [[package]]
 name = "ethers-providers"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "async-trait",
  "auto_impl 1.2.0",
@@ -4416,6 +4425,7 @@ dependencies = [
 [[package]]
 name = "ethers-signers"
 version = "1.0.2"
+source = "git+https://github.com/midl-xyz/ethers-rs?tag=0.0.1-midl#e1f4d6f0823d7c281d87a04d1968e7ecb411f499"
 dependencies = [
  "async-trait",
  "coins-bip32 0.7.0",
@@ -5788,7 +5798,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.7",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -7954,7 +7964,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
 dependencies = [
- "proc-macro-crate 3.2.0",
+ "proc-macro-crate 1.2.1",
  "proc-macro2 1.0.93",
  "quote 1.0.42",
  "syn 2.0.109",
@@ -15777,11 +15787,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "ethers-derive-eip712"
-version = "1.0.2"
-
-[[patch.unused]]
-name = "ethers-solc"
-version = "1.0.2"

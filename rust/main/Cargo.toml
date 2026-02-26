@@ -263,28 +263,28 @@ tag = "2025-08-07"
 
 [workspace.dependencies.ethers]
 features = []
-git = "https://github.com/hyperlane-xyz/ethers-rs"
-tag = "2025-05-30"
+git = "https://github.com/midl-xyz/ethers-rs"
+tag = "0.0.1-midl"
 
 [workspace.dependencies.ethers-contract]
 features = ["legacy"]
-git = "https://github.com/hyperlane-xyz/ethers-rs"
-tag = "2025-05-30"
+git = "https://github.com/midl-xyz/ethers-rs"
+tag = "0.0.1-midl"
 
 [workspace.dependencies.ethers-core]
 features = []
-git = "https://github.com/hyperlane-xyz/ethers-rs"
-tag = "2025-05-30"
+git = "https://github.com/midl-xyz/ethers-rs"
+tag = "0.0.1-midl"
 
 [workspace.dependencies.ethers-providers]
 features = []
-git = "https://github.com/hyperlane-xyz/ethers-rs"
-tag = "2025-05-30"
+git = "https://github.com/midl-xyz/ethers-rs"
+tag = "0.0.1-midl"
 
 [workspace.dependencies.ethers-signers]
 features = ["aws"]
-git = "https://github.com/hyperlane-xyz/ethers-rs"
-tag = "2025-05-30"
+git = "https://github.com/midl-xyz/ethers-rs"
+tag = "0.0.1-midl"
 
 [patch.crates-io.curve25519-dalek]
 branch = "v3.2.2-relax-zeroize"
@@ -320,26 +320,6 @@ version = "=1.14.13"
 git = "https://github.com/hyperlane-xyz/solana.git"
 tag = "hyperlane-1.14.13-2025-05-21"
 version = "=1.14.13"
-
-# Local mirror for the Hyperlane ethers-rs fork.
-#
-# Some environments rewrite `https://github.com/...` to `ssh://git@github.com/...` via git config
-# (url.<...>.insteadOf). That breaks builds when SSH auth isn't available.
-#
-# This keeps behavior identical to the pinned Hyperlane fork/tag, but avoids network fetching.
-[patch."https://github.com/hyperlane-xyz/ethers-rs"]
-ethers = { path = "../../../ethers-rs" }
-ethers-addressbook = { path = "../../../ethers-rs/ethers-addressbook" }
-ethers-contract = { path = "../../../ethers-rs/ethers-contract" }
-ethers-contract-abigen = { path = "../../../ethers-rs/ethers-contract/ethers-contract-abigen" }
-ethers-contract-derive = { path = "../../../ethers-rs/ethers-contract/ethers-contract-derive" }
-ethers-core = { path = "../../../ethers-rs/ethers-core" }
-ethers-derive-eip712 = { path = "../../../ethers-rs/ethers-core/ethers-derive-eip712" }
-ethers-etherscan = { path = "../../../ethers-rs/ethers-etherscan" }
-ethers-middleware = { path = "../../../ethers-rs/ethers-middleware" }
-ethers-providers = { path = "../../../ethers-rs/ethers-providers" }
-ethers-signers = { path = "../../../ethers-rs/ethers-signers" }
-ethers-solc = { path = "../../../ethers-rs/ethers-solc" }
 
 [patch.crates-io.solana-program]
 git = "https://github.com/hyperlane-xyz/solana.git"
