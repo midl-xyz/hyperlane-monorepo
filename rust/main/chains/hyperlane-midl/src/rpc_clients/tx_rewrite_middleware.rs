@@ -24,6 +24,34 @@ use hyperlane_core::{ChainCommunicationError, H256};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+/// Minimal trait for making `eth_call` RPCs. Object-safe so it can be passed as `&dyn EthCaller`.
+#[async_trait]
+pub trait EthCaller: Send + Sync {
+    async fn eth_call(
+        &self,
+        tx: &TypedTransaction,
+        block: Option<ethers::types::BlockId>,
+    ) -> Result<Bytes, ChainCommunicationError>;
+}
+
+/// Any ethers Middleware can serve as an EthCaller.
+#[async_trait]
+impl<M> EthCaller for M
+where
+    M: Middleware + Send + Sync,
+    M::Error: std::error::Error + Send + Sync + 'static,
+{
+    async fn eth_call(
+        &self,
+        tx: &TypedTransaction,
+        block: Option<ethers::types::BlockId>,
+    ) -> Result<Bytes, ChainCommunicationError> {
+        Middleware::call(self, tx, block)
+            .await
+            .map_err(ChainCommunicationError::from_other)
+    }
+}
+
 /// Key for caching MIDL metadata: (to_address, nonce)
 /// We use `to` instead of `from` because `from` requires signature recovery,
 /// which fails for MIDL transactions that use BIP322/BIP143 signatures.
@@ -43,6 +71,7 @@ pub trait MidlMetadataProvider: Send + Sync {
     async fn prepare_metadata(
         &self,
         tx: &TypedTransaction,
+        caller: &dyn EthCaller,
     ) -> Result<MidlPreparedMetadata, ChainCommunicationError>;
 
     /// Check whether BTC funds are available for a MIDL transaction.
@@ -50,33 +79,6 @@ pub trait MidlMetadataProvider: Send + Sync {
     /// or `None` if the check cannot be performed.
     async fn check_btc_funds_available(&self) -> Option<U256> {
         None
-    }
-}
-
-/// Static provider that always returns the same metadata blob. Useful for tests
-/// or environments where another agent handles BTC lifecycle management.
-#[derive(Clone, Debug)]
-pub struct StaticMidlMetadataProvider {
-    metadata: MidlPreparedMetadata,
-}
-
-impl StaticMidlMetadataProvider {
-    pub fn new(metadata: MidlPreparedMetadata) -> Self {
-        Self { metadata }
-    }
-}
-
-#[async_trait]
-impl MidlMetadataProvider for StaticMidlMetadataProvider {
-    async fn prepare_metadata(
-        &self,
-        _tx: &TypedTransaction,
-    ) -> Result<MidlPreparedMetadata, ChainCommunicationError> {
-        Ok(self.metadata.clone())
-    }
-
-    async fn check_btc_funds_available(&self) -> Option<U256> {
-        Some(U256::zero()) // Static provider = BTC lifecycle managed externally
     }
 }
 
@@ -203,7 +205,6 @@ pub struct BtcSignerMidlMetadataProvider {
     default_fee_rate: u64,
     /// Optional mempool URL for dynamic fee estimation
     mempool_url: Option<String>,
-    provider: ethers::providers::Provider<ethers::providers::Http>,
     /// Cached TSS x-only public key (32 bytes)
     tss_pubkey: tokio::sync::OnceCell<[u8; 32]>,
 }
@@ -215,19 +216,16 @@ impl BtcSignerMidlMetadataProvider {
     /// * `signer` - The BtcSigner to use for signing
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate in satoshis per virtual byte
-    /// * `provider` - Ethers provider for fetching TSS address
     pub fn new(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
-        provider: ethers::providers::Provider<ethers::providers::Http>,
     ) -> Self {
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: None,
-            provider,
             tss_pubkey: tokio::sync::OnceCell::new(),
         }
     }
@@ -239,47 +237,43 @@ impl BtcSignerMidlMetadataProvider {
     /// * `utxo_provider` - Provider for UTXOs to spend
     /// * `default_fee_rate` - Default fee rate (fallback if API fails)
     /// * `mempool_url` - URL for mempool API to fetch fee rates
-    /// * `provider` - Ethers provider for fetching TSS address
     pub fn with_mempool_url(
         signer: crate::signer::BtcSigner,
         utxo_provider: Arc<dyn UtxoProvider>,
         default_fee_rate: u64,
         mempool_url: String,
-        provider: ethers::providers::Provider<ethers::providers::Http>,
     ) -> Self {
         Self {
             signer,
             utxo_provider,
             default_fee_rate,
             mempool_url: Some(mempool_url),
-            provider,
             tss_pubkey: tokio::sync::OnceCell::new(),
         }
     }
 
     /// Fetch the TSS x-only public key from GlobalParams contract.
     /// The result is cached after the first successful fetch.
-    async fn get_tss_pubkey(&self) -> Result<[u8; 32], ChainCommunicationError> {
+    async fn get_tss_pubkey(
+        &self,
+        caller: &dyn EthCaller,
+    ) -> Result<[u8; 32], ChainCommunicationError> {
         self.tss_pubkey
-            .get_or_try_init(|| async { self.fetch_tss_pubkey_from_contract().await })
+            .get_or_try_init(|| async { self.fetch_tss_pubkey_from_contract(caller).await })
             .await
             .copied()
     }
 
     /// Fetch TSS address from GlobalParams contract via eth_call.
-    async fn fetch_tss_pubkey_from_contract(&self) -> Result<[u8; 32], ChainCommunicationError> {
-        use ethers::providers::Middleware as _;
-
+    async fn fetch_tss_pubkey_from_contract(
+        &self,
+        caller: &dyn EthCaller,
+    ) -> Result<[u8; 32], ChainCommunicationError> {
         let tx = TransactionRequest::new()
             .to(*GLOBAL_PARAMS_CONTRACT)
             .data(Bytes::from(GET_TSS_ADDRESS_SELECTOR.to_vec()));
 
-        let result_bytes = self.provider.call(&tx.into(), None).await.map_err(|e| {
-            ChainCommunicationError::CustomError(format!(
-                "Failed to fetch TSS address from GlobalParams: {}",
-                e
-            ))
-        })?;
+        let result_bytes = caller.eth_call(&tx.into(), None).await?;
 
         // bytes32 = 32 bytes
         if result_bytes.len() != 32 {
@@ -370,11 +364,12 @@ impl MidlMetadataProvider for BtcSignerMidlMetadataProvider {
     async fn prepare_metadata(
         &self,
         tx: &TypedTransaction,
+        caller: &dyn EthCaller,
     ) -> Result<MidlPreparedMetadata, ChainCommunicationError> {
         use crate::signer::BtcAddressType;
 
         // Fetch the TSS x-only public key from GlobalParams contract
-        let tss_pubkey = self.get_tss_pubkey().await?;
+        let tss_pubkey = self.get_tss_pubkey(caller).await?;
 
         // Get dynamic fee rate from mempool API (or use default)
         let fee_rate = self.get_fee_rate().await;
@@ -782,7 +777,7 @@ where
             "Preparing MIDL metadata for transaction"
         );
 
-        let metadata = metadata_provider.prepare_metadata(tx).await?;
+        let metadata = metadata_provider.prepare_metadata(tx, &self.inner).await?;
 
         // Convert the transaction to MIDL type 7 with BTC metadata
         // This must happen before signing so the signer signs a type 7 transaction
@@ -852,9 +847,9 @@ where
 
 /// Convert a TypedTransaction to a MIDL type 7 transaction with BTC metadata.
 /// MIDL fixed gas price: 1,000,000 wei (1 gwei)
-const MIDL_GAS_PRICE: u64 = 1_000_000;
+pub const MIDL_GAS_PRICE: u64 = 1_000_000;
 
-fn convert_to_midl_transaction(
+pub fn convert_to_midl_transaction(
     tx: &TypedTransaction,
     metadata: &MidlPreparedMetadata,
 ) -> TypedTransaction {
@@ -958,6 +953,44 @@ mod tests {
     use super::*;
     use ethers::types::{Address, U256};
 
+    struct NoopEthCaller;
+
+    #[async_trait]
+    impl EthCaller for NoopEthCaller {
+        async fn eth_call(
+            &self,
+            _tx: &TypedTransaction,
+            _block: Option<ethers::types::BlockId>,
+        ) -> Result<Bytes, ChainCommunicationError> {
+            Err(ChainCommunicationError::CustomError(
+                "NoopEthCaller: not available in tests".to_string(),
+            ))
+        }
+    }
+
+    /// Static provider that always returns the same metadata blob. Test-only.
+    #[derive(Clone, Debug)]
+    struct StaticMidlMetadataProvider {
+        metadata: MidlPreparedMetadata,
+    }
+
+    impl StaticMidlMetadataProvider {
+        fn new(metadata: MidlPreparedMetadata) -> Self {
+            Self { metadata }
+        }
+    }
+
+    #[async_trait]
+    impl MidlMetadataProvider for StaticMidlMetadataProvider {
+        async fn prepare_metadata(
+            &self,
+            _tx: &TypedTransaction,
+            _caller: &dyn EthCaller,
+        ) -> Result<MidlPreparedMetadata, ChainCommunicationError> {
+            Ok(self.metadata.clone())
+        }
+    }
+
     #[test]
     fn test_extract_key_from_transaction() {
         let mut tx = TypedTransaction::default();
@@ -1045,7 +1078,7 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let tx = TypedTransaction::default();
-            let result = provider.prepare_metadata(&tx).await;
+            let result = provider.prepare_metadata(&tx, &NoopEthCaller).await;
             assert!(result.is_ok());
             let prepared = result.unwrap();
             assert_eq!(prepared.btc_tx_hash, metadata.btc_tx_hash);

@@ -1,5 +1,5 @@
 use ethers::providers::Middleware;
-use ethers_core::types::{BlockId, BlockNumber, Bytes};
+use ethers_core::types::{BlockId, BlockNumber};
 use url::Url;
 
 use hyperlane_core::{
@@ -115,20 +115,9 @@ pub struct TransactionOverrides {
     pub gas_limit_cap: Option<U256>,
 }
 
-/// Static Midl metadata used for transaction rewriting.
-#[derive(Clone, Debug)]
-pub struct MidlStaticMetadata {
-    pub btc_tx_hash: H256,
-    pub btc_transaction: Bytes,
-    pub public_key: Bytes,
-    pub btc_address_byte: U256,
-}
-
 /// Configuration for rewriting write transactions into Midl bundles.
 #[derive(Clone, Debug, Default)]
 pub struct MidlExecutionConf {
-    /// Static metadata for when not using a BTC signer (e.g., testing or external BTC management)
-    pub static_metadata: Option<MidlStaticMetadata>,
     /// BTC fee rate in satoshis per virtual byte for dynamic transaction building.
     /// Only used when a btcKey signer is configured.
     /// Defaults to 10 sat/vbyte if not specified.

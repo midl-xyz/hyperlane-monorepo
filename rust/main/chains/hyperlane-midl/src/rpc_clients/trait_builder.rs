@@ -34,8 +34,7 @@ use hyperlane_metric::prometheus_metric::{
 use tracing::instrument;
 
 use crate::rpc_clients::tx_rewrite_middleware::{
-    BtcSignerMidlMetadataProvider, BtcUtxo, MidlMetadataProvider, MidlPreparedMetadata,
-    StaticMidlMetadataProvider, TxRewriteMiddleware, UtxoProvider,
+    BtcSignerMidlMetadataProvider, BtcUtxo, MidlMetadataProvider, TxRewriteMiddleware, UtxoProvider,
 };
 use crate::rpc_clients::MempoolUtxoProvider;
 use crate::signer::Signers;
@@ -53,12 +52,12 @@ const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// We only adjust the `"type"` field inside the first transaction object param for a small set of
 /// methods that take a tx-like object.
 #[derive(Clone, Debug)]
-struct CanonicalizeTxTypeClient<C> {
+pub struct CanonicalizeTxTypeClient<C> {
     inner: C,
 }
 
 impl<C> CanonicalizeTxTypeClient<C> {
-    fn new(inner: C) -> Self {
+    pub fn new(inner: C) -> Self {
         Self { inner }
     }
 
@@ -462,21 +461,6 @@ pub fn build_metadata_provider(
             .and_then(|conf| conf.btc_fee_rate_sat_per_vbyte)
             .unwrap_or(10); // Default to 10 sat/vbyte
 
-        let rpc_urls = conn.rpc_urls();
-        let rpc_url = rpc_urls
-            .first()
-            .map(|url| url.to_string())
-            .unwrap_or_default();
-
-        let provider = Provider::<Http>::try_from(&rpc_url)
-            .map_err(|e| {
-                ChainCommunicationError::CustomError(format!(
-                    "Failed to create ethers provider from RPC URL: {}",
-                    e
-                ))
-            })
-            .ok()?;
-
         // Create a UTXO provider from config
         let utxo_provider: Arc<dyn UtxoProvider> = if let Some(mempool_url) = conn
             .execution
@@ -503,23 +487,10 @@ pub fn build_metadata_provider(
             btc_signer.clone(),
             utxo_provider,
             fee_rate,
-            provider,
         )));
     }
 
-    // Fall back to static metadata if provided
-    let metadata = conn
-        .execution
-        .as_ref()
-        .and_then(|conf| conf.static_metadata.as_ref())?;
-
-    let prepared = MidlPreparedMetadata {
-        btc_tx_hash: metadata.btc_tx_hash,
-        btc_transaction: metadata.btc_transaction.clone(),
-        public_key: metadata.public_key.clone(),
-        btc_address_byte: metadata.btc_address_byte.into(),
-    };
-    Some(Arc::new(StaticMidlMetadataProvider::new(prepared)))
+    None
 }
 
 /// A cache for reqwest clients, indexed by URL.
