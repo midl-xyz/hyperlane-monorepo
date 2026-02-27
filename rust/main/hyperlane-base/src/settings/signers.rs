@@ -132,9 +132,7 @@ impl BuildableWithSignerConf for hyperlane_ethereum::Signers {
                 bail!("radixKey signer is not supported by Ethereum")
             }
             SignerConf::BtcKey { .. } => {
-                bail!(
-                    "btcKey signer is not supported by standard Ethereum chains, use MIDL protocol"
-                )
+                bail!("btcKey signer is not supported by Ethereum")
             }
         })
     }
