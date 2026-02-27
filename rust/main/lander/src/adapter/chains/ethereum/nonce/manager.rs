@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ethers::signers::Signer;
 use ethers_core::types::Address;
 use tracing::{debug, info};
 
 use hyperlane_base::db::HyperlaneRocksDB;
-use hyperlane_base::settings::{ChainConf, SignerConf};
+use hyperlane_base::settings::ChainConf;
 use hyperlane_core::U256;
-use hyperlane_ethereum::{EthereumReorgPeriod, EvmProviderForLander, Signers};
+use hyperlane_ethereum::{EthereumReorgPeriod, EvmProviderForLander};
 
 use crate::dispatcher::TransactionDb;
 use crate::transaction::{Transaction, TransactionUuid};
@@ -109,13 +108,12 @@ impl NonceManager {
     }
 
     async fn address(chain_conf: &ChainConf) -> eyre::Result<Address> {
-        let signer_conf = chain_conf
-            .signer
-            .as_ref()
+        let chain_signer = chain_conf
+            .chain_signer()
+            .await?
             .ok_or_else(|| eyre::eyre!("Signer configuration is missing"))?;
-        let signer: Signers = signer_conf.build().await?;
-        let address = signer.address();
-        Ok(address)
+        let h256 = chain_signer.address_h256();
+        Ok(Address::from_slice(&h256.as_bytes()[12..]))
     }
 }
 
