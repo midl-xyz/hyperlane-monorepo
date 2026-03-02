@@ -295,11 +295,11 @@ impl BtcSignerMidlMetadataProvider {
     }
 
     /// Fetch the current fee rate from mempool API or use default.
+    /// Applies a floor of 5 sat/vB and a 1.5x multiplier as per MIDL node requirement
     async fn get_fee_rate(&self) -> u64 {
-        if let Some(url) = &self.mempool_url {
+        let base_rate = if let Some(url) = &self.mempool_url {
             match crate::rpc_clients::fetch_fee_rate(url).await {
                 Ok(rates) => {
-                    // Use half_hour_fee for a balance of speed and cost
                     debug!(
                         fastest = rates.fastest_fee,
                         half_hour = rates.half_hour_fee,
@@ -315,7 +315,10 @@ impl BtcSignerMidlMetadataProvider {
             }
         } else {
             self.default_fee_rate
-        }
+        };
+        let adjusted = base_rate.max(5) * 3 / 2;
+        debug!(base_rate, adjusted, "Adjusted fee rate: max(rate, 5) * 1.5");
+        adjusted
     }
 
     /// Sign a hash using BIP340 Schnorr signature (for Taproot).
