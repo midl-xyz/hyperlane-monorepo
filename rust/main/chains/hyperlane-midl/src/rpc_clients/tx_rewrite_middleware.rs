@@ -316,8 +316,8 @@ impl BtcSignerMidlMetadataProvider {
         } else {
             self.default_fee_rate
         };
-        let adjusted = base_rate.max(5) * 3 / 2;
-        debug!(base_rate, adjusted, "Adjusted fee rate: max(rate, 5) * 1.5");
+        let adjusted = (base_rate * 3 / 2).max(5);
+        debug!(base_rate, adjusted, "Adjusted fee rate: max(5, rate * 1.5)");
         adjusted
     }
 
